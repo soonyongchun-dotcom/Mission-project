@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>산점도 아이언 일관성 마스터</title>
+  <style>
+    * {box-sizing:border-box;}
+    body {font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#38944a; margin:0; padding:1rem; color:#3ba59e; font-size:13px;}
+    .container {width:min(100%, 1160px); margin:0 auto; background:#fff; border-radius:10px; box-shadow:0 5px 22px rgba(0,0,0,0.08); padding:1.2rem; overflow:hidden;}
+    h1,h2 {color:#0b3c68; margin:0 0 .6rem;}
+    input, select, button {font-size: 1rem; margin: .25rem 0; padding:.55rem .8rem; border-radius:6px; border:1px solid #c7d3df;}
+    button {cursor:pointer;}
+    table {width:100%; border-collapse:collapse; margin-top:1rem;}
+    th, td {border:1px solid #ddd; padding:.45rem; text-align:center;}
+    .result {margin-top:1rem; background:#fff7d6; border-left:4px solid #f1c40f; padding:.8rem;}
+    #charts {display:flex; flex-wrap:wrap; gap:1rem; margin-top:1rem;}
+    .chart-box {flex:1 1 35%; min-width:260px; background:#ffffff; padding:.8rem; border:1px solid #eee; border-radius:8px;}
+    .input-unit-outer {margin-right:0.6rem; display:inline-flex; align-items:center; border:1px solid #ccc; border-radius:5px; padding:2px 5px; background:#fff;}
+    .input-unit-outer input {width:74px; border:none; outline:none; padding:2px; font-size:1rem;}
+    .unit-inner {margin-left:4px; color:#444; font-size:1rem;}
+    #clubSelect {font-size:1.1rem;}
+    #output, #tableContainer, #shotCountLabel {font-size:1rem;}
+    .shot-row.saved {background:#f6fff5; border-left:3px solid #2f9f50;}
+    .shot-row .row-status {margin-left:0.5rem; color:#548a50; font-size:.82rem; font-weight:600;}
+
+    .btn-clean, .btn-outline, #unitMBtn, #unitYdBtn {font-size:0.72rem; width:110px; min-width:110px; height:34px; padding:.25rem .4rem; border-radius:8px; display:inline-flex; align-items:center; justify-content:center;}
+    #shotInputRows {max-height:270px; overflow-y:auto; border:1px solid #ccc; border-radius:8px; padding:0.35rem; background:#fafafa;}
+    #shotInputRows .shot-row {margin-bottom:0.4rem;}
+    .btn-clean {background:#0b3c68; color:#fff; border:1px solid #0b3c68; font-weight:600; transition:all .2s ease;}
+    .btn-clean:hover {background:#0a3155; border-color:#0a3155;}
+    .btn-outline {background:#fff; color:#0b3c68; border:1px solid #0b3c68;}
+    .btn-outline:hover {background:rgba(11,60,104,.1);}
+
+    .top-toolbar {display:flex; flex-wrap:wrap; align-items:center; gap:.8rem; justify-content:space-between;}
+    .toolbar-block {display:flex; flex-wrap:wrap; gap:.5rem; align-items:center;}
+    .toolbar-box {border:1px solid #d8e3ef; border-radius:8px; background:#fafbfc; padding:.65rem .7rem;}
+
+    @media (max-width: 900px) {
+      body {padding:.8rem;}
+      .container {padding:.8rem;}
+      .chart-box {flex:1 1 100%;}
+      .toolbar-block {flex:1 1 100%; justify-content:flex-start;}
+      .toolbar-box {width:100%;}
+      .btn-clean, .btn-outline {flex:1 1 auto; min-width:140px;}
+    }
+
+    @media (max-width: 600px) {
+      .input-unit-outer {display:flex; flex-direction:column; align-items:flex-start;}
+      .input-unit-outer input {width:100%;}
+      .top-toolbar {flex-direction:column; align-items:flex-start;}
+      .toolbar-block {width:100%;}
+      .toolbar-box {padding:0.5rem;}
+      #shotInputRows .shot-row {display:flex; flex-direction:column; align-items:flex-start; gap:0.4rem;}
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <div style="background:#f7f7f7; padding:1rem; border-radius:10px 10px 0 0; margin-bottom:1rem; display:flex; align-items:center; justify-content:center; gap:0.8rem;">
+    <h1 style="margin:0;">SY-Ccatter Plot 기반 샷 일관성 마스터</h1>
+    <span style="font-size:0.8rem; color:#555; background:#fff; border:1px solid #ddd; border-radius:4px; padding:2px 6px;">ver 26.3.1</span>
+  </div>
+  <div class="container">
+    <div style="background:#ffe9f0; border:1px solid #f3d6e1; border-radius:8px; padding:0.8rem; margin-bottom:0.8rem; color:#a24269;">
+      CSV 파일 업로드 또는 미션 시작을 통해 수동 데이터를 입력하여 분석합니다. 분석은 10개 이상의 데이터를 필요로 합니다.
+    </div>
+
+    <div class="controls">
+      <!-- 상단 버튼들이 모두 미션 샷 입력 아래로 이동됨 -->
+    </div>
+
+    <div class="section">
+      <h2>미션 샷 입력</h2>
+      <button id="startMissionBtn">샷 일관성 미션 시작</button>
+      <button id="restoreBackupBtn" style="display:none; margin-left:0.5rem;">↩ 복원</button>
+      <span id="shotCountLabel">(샷 0/100)</span>
+
+      <div style="margin-top:1rem; border:1px dashed #ccc; padding:0.8rem; border-radius:8px; background:#fafafa;">
+        <h3 style="margin:0 0 .4rem 0;">실전 18홀 가상라운드 미션</h3>
+        <button id="startVMissionBtn" style="background:#2f9f50; color:#fff; border:none; padding:.5rem .8rem; border-radius:6px; cursor:pointer;">[SY-V-001] 18홀 가상라운드 미션 선택</button>
+      </div>
+    </div>
+      <div class="top-toolbar" style="margin-top:0.8rem;">
+        <div class="toolbar-block">
+          <label style="font-weight:600;">클럽 선택:</label>
+          <select id="clubSelect" style="min-width:130px; font-size:1.1rem;">
+            <option value="D">드라이버</option>
+            <option value="W">우드</option>
+            <option value="U">유틸리티</option>
+            <option value="W1">웨지1</option>
+            <option value="W2">웨지2</option>
+            <option value="P">PW</option>
+            <option value="9">9번</option>
+            <option value="8">8번</option>
+            <option value="7">7번</option>
+            <option value="6">6번</option>
+            <option value="5">5번</option>
+            <option value="4">4번</option>
+          </select>
+          <button class="btn-clean" type="button" id="unitMBtn">m</button>
+          <button class="btn-outline" type="button" id="unitYdBtn">yd</button>
+        </div>
+        <div class="toolbar-box toolbar-block">
+          <button class="btn-clean" id="csvInputBtn" type="button" onclick="document.getElementById('csvInput').click();"><span style="font-size:1.1rem;">📄</span> CSV Upload</button>
+          <input type="file" id="csvInput" accept=".csv" style="display:none;" />
+          <button class="btn-clean" id="csvDownloadBtn">💾 CSV Download</button>
+          <button class="btn-clean" id="loadSampleBtn">📊 Sample</button>
+          <button class="btn-clean" id="computeBtn">⚡ Run</button>
+          <button class="btn-outline" id="resetAllBtn">🧹 Reset</button>
+          <button class="btn-clean" id="pdfDownloadBtn">📄 PDF</button>
+        </div>
+      </div>
+      <div id="metricSelectionPanel" style="display:none; margin-top:0.8rem; border:1px solid #ddd; padding:0.8rem; border-radius:6px; background:#fafafa;">
+        <h3 style="margin:0 0 0.4rem 0;">일관성 평가 요소 선택</h3>
+        <div style="margin-bottom:0.4rem;">기본 선택: <strong>Carry distance + 좌우편차</strong></div>
+        <div id="metricCheckboxes" style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.6rem;"></div>
+        <div style="font-size:0.9rem; color:#444; margin-bottom:0.6rem;">Carry distance + SideTotal 포함 총 3~4개 항목 선택</div>
+        <button id="confirmMetricsBtn" type="button" style="padding:0.4rem 0.7rem;">선택 완료</button>
+      </div>
+      <div id="shotInputRowsWrapper" style="margin-top:0.8rem; display:none;">
+        <div style="display:flex; justify-content:flex-end; align-items:center; gap:0.6rem; margin-bottom:0.4rem;">
+          <div id="shotCountBadge" style="background:#0b3c68; color:#fff; border-radius:12px; padding:0.3rem 0.65rem; font-weight:700; font-size:0.95rem;">샷 0/100</div>
+          <button id="addShotBtn" disabled style="display:inline-block;">샷 추가</button>
+        </div>
+        <div id="shotInputRows"></div>
+      </div>
+    </div>
+
+    <div id="output" class="result" style="display:none;"></div>
+
+    <div id="virtualMissionPanel" style="display:none; margin-top:1rem; border:1px solid #9ca8b5; background:#f8faff; border-radius:8px; padding:1rem;">
+      <h3>[SY-V-001] 18홀 가상라운드 미션</h3>
+      <p>아래는 18홀 가상라운드 미션 수행 지침입니다.</p>
+      <b>1. 미션 개요</b>
+      <ul>
+        <li>목적: 임의 코스를 대상으로 실전처럼 라운드, 샷 정교함/코스 공략 자신감 획득</li>
+        <li>환경: Trackman 스크린 연습장 모드 또는 레이지</li>
+        <li>수행: 각 홀에 실제 코스+위험요소 이미지 사용</li>
+      </ul>
+      <b>2. 미션 성공 조건 (Pass/Fail)</b>
+      <ol>
+        <li>드라이버 비거리: 본인 평균 캐리의 95% 이상 유지</li>
+        <li>FIR: 14회 중 10회(70%) 이상(20m 이내 랜딩)</li>
+        <li>GIR: 18홀 중 12홀(66%) 이상(핀 10m 이내)</li>
+        <li>스코어 72타 이하 (가상 퍼트 포함)</li>
+      </ol>
+      <p>4개 조건 모두 만족 시 Pass</p>
+      <b>3. 퍼팅 타수 산정</b>
+      <ul>
+        <li>Zone A(5m 이내): 1.5타</li>
+        <li>Zone B(5m 초과~10m): 2타</li>
+        <li>Zone C(10m 초과): 2.5타</li>
+      </ul>
+      <button id="startVMissionGoBtn" style="margin-right:.5rem; background:#1a73e8; color:#fff; border:none; padding:.5rem .8rem; border-radius:6px; cursor:pointer;">미션 시작 (사이트 연결)</button>
+      <button id="closeVMissionBtn" style="background:#d32f2f; color:#fff; border:none; padding:.5rem .8rem; border-radius:6px; cursor:pointer;">미션 닫기</button>
+      <div id="vMissionFrameContainer" style="display:none; margin-top:1rem; border:1px solid #ddd; border-radius:8px; overflow:hidden; height:70vh;">
+        <div style="background:#fff; border-bottom:1px solid #ddd; padding:.5rem; display:flex; justify-content:space-between; align-items:center;">
+          <span>가상라운드 미션 진행 중</span>
+          <button id="closeVframeBtn" style="background:#aaa; color:#fff; border:none; padding:.3rem .6rem; border-radius:5px; cursor:pointer;">닫기</button>
+        </div>
+        <iframe id="vMissionIframe" src="" frameborder="0" style="width:100%; height:calc(100% - 40px);"></iframe>
+      </div>
+    </div>
+
+    <div id="tableContainer"></div>
+    <div id="charts"></div>
+  </div>
+
+<script>
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const headerTranslation = {
+    '클럽헤드스피드': 'ClubHeadSpeed',
+    '클럽 헤드 스피드': 'ClubHeadSpeed',
+    '클럽헤드 속도': 'ClubHeadSpeed',
+    '스매쉬팩터': 'SmashFactor',
+    '런치앵글': 'LaunchAngle',
+    '어택앵글': 'AttackAngle',
+    '페이스앵글': 'FaceAngle',
+    '사이드스핀': 'SideSpin',
+    '사이드 스핀': 'SideSpin',
+    '백스핀': 'BackSpin',
+    '거리': 'Carry',
+    '캐리': 'Carry',
+    'Carry': 'Carry',
+    '높이': 'Height',
+    '사이드토탈': 'SideTotal',
+    'Side': 'SideTotal',
+    'side': 'SideTotal',
+    'SideTotal': 'SideTotal'
+  };
+
+  const headers = lines[0].split(',').map(h => h.trim());
+  const mappedHeaders = headers.map(h => headerTranslation[h] || h);
+
+  const rows = lines.slice(1).map(line => {
+    const cols = line.split(',').map(v => v.trim());
+    let obj = {};
+    mappedHeaders.forEach((k, i) => {
+      const raw = cols[i];
+      const parsed = Number(raw);
+      obj[k] = Number.isFinite(parsed) ? parsed : raw;
+    });
+    return obj;
+  });
+  return rows;
+}
+
+function safeAddEventListener(id, event, handler) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener(event, handler);
+  } else {
+    console.warn(`safeAddEventListener: #${id} not found`);
+  }
+}
+
+function encloseCircle(points) {
+  if (points.length===0) return {center:[0,0],r:0};
+  let C=[points[0]]; let r=0;
+
+  function dist(a,b){return Math.hypot(a[0]-b[0], a[1]-b[1]);}
+  function circle2(a,b){return {center: [(a[0]+b[0])/2, (a[1]+b[1])/2], r: dist(a,b)/2}};
+  function circle3(a,b,c){
+    const d = 2*(a[0]*(b[1]-c[1]) + b[0]*(c[1]-a[1]) + c[0]*(a[1]-b[1]));
+    if (Math.abs(d) < 1e-9) return null;
+    const ux = ((a[0]*a[0]+a[1]*a[1])*(b[1]-c[1]) + (b[0]*b[0]+b[1]*b[1])*(c[1]-a[1]) + (c[0]*c[0]+c[1]*c[1])*(a[1]-b[1])) / d;
+    const uy = ((a[0]*a[0]+a[1]*a[1])*(c[0]-b[0]) + (b[0]*b[0]+b[1]*b[1])*(a[0]-c[0]) + (c[0]*c[0]+c[1]*c[1])*(b[0]-a[0])) / d;
+    const center=[ux,uy];
+    return {center, r: dist(center,a)};
+  }
+
+  let mec=circle2(points[0], points[0]);
+  for (let i=0;i<points.length;i++){
+    if (dist(points[i], mec.center) > mec.r + 1e-9) {
+      mec = circle2(points[i], points[i]);
+      for (let j=0;j<i;j++) {
+        if (dist(points[j], mec.center) > mec.r + 1e-9) {
+          mec = circle2(points[i], points[j]);
+          for (let k=0;k<j;k++) {
+            if (dist(points[k], mec.center) > mec.r + 1e-9) {
+              const c=circle3(points[i],points[j],points[k]);
+              if (c) mec = c;
+            }
+          }
+        }
+      }
+    }
+  }
+  return mec;
+}
+
+function describeShots(shots, club, selectedMetrics) {
+  if (shots.length < 10) throw '10개 이상 샷 필요';
+  if (shots.length > 100) {
+    shots = shots.slice(0, 100); // 최대 100개까지만 사용
+  }
+  selectedMetrics = selectedMetrics || ['Carry','SideTotal','Height','BackSpin','SideSpin'];
+  const metricNames = ['Carry','SideTotal','Height','BackSpin','SideSpin','ClubHeadSpeed','BallSpeed','SmashFactor','LaunchAngle','AttackAngle','FaceAngle'];
+
+  function toNumber(val){
+    const num = Number(val);
+    return Number.isFinite(num) ? num : 0;
+  }
+
+  function stats(arr){
+    const numbers = arr.filter(v => typeof v === 'number' && Number.isFinite(v));
+    if (!numbers.length) return {mean:0,min:0,max:0,range:0,std:0};
+    const mean = numbers.reduce((a,b)=>a+b,0)/numbers.length;
+    const min = Math.min(...numbers); const max=Math.max(...numbers);
+    const range = max-min;
+    const std = numbers.length > 1 ? Math.sqrt(numbers.reduce((a,v)=>a+(v-mean)*(v-mean),0)/(numbers.length-1)) : 0;
+    return {mean,min,max,range,std};
+  }
+
+  const statsByMetric = {};
+  metricNames.forEach(metric => {
+    const arr = shots.map(s => toNumber(s[metric]));
+    statsByMetric[metric] = stats(arr);
+  });
+
+  const pointcloud = shots.map(s=>[toNumber(s.SideTotal), toNumber(s.Carry)]);
+  const circle = encloseCircle(pointcloud);
+  circle.area = Math.PI * circle.r * circle.r;
+  circle.diameter = circle.r * 2;
+
+  // 요약 구조: 키를 대소문자/카멜케이스 모두 지원하여 기존 코드와 호환 유지
+  const summary = {
+    ...statsByMetric,
+    ...Object.keys(statsByMetric).reduce((obj, key) => {
+      const lowerKey = key.toLowerCase();
+      const camelKey = key.charAt(0).toLowerCase() + key.slice(1);
+      obj[lowerKey] = statsByMetric[key];
+      obj[camelKey] = statsByMetric[key];
+      return obj;
+    }, {}),
+    circle,
+  };
+
+  const dispLimit = (club==='7I') ? 12 : 8;
+  const passA = summary.circle.diameter <= dispLimit;
+  let advice=[];
+  if (selectedMetrics.includes('Carry')) {
+    if (summary.carry.range > 6) advice.push('거리 편차 높음');
+    else if (summary.carry.range > 4) advice.push('거리 편차 보통'); else advice.push('거리 매우 안정');
+  }
+  if (selectedMetrics.includes('Height')) {
+    if (summary.height.range > 3.5) advice.push('높이 편차 불안정');
+    else if (summary.height.range > 2) advice.push('높이 편차 중간'); else advice.push('높이 안정');
+  }
+  if (selectedMetrics.includes('SideTotal')) {
+    if (Math.abs(summary.sideTotal.mean) > 1.5) advice.push('좌우 치우침');
+    else advice.push('좌우 안정');
+  }
+  if (selectedMetrics.includes('SideSpin')) {
+    if (summary.sideSpin.range > 350) advice.push('사이드스핀 불안정');
+    else advice.push('사이드스핀 안정');
+  }
+
+  const metricResults = {};
+
+  let selectionPass = true;
+  const ratioValues = [];
+
+  selectedMetrics.forEach(metric => {
+    const stat = summary[metric] || summary[metric.toLowerCase()] || { mean: 0, std: 0, range: 0 };
+    const mean = stat.mean;
+    const std = stat.std;
+    const ratio = Math.abs(mean) < 1e-9 ? (std < 0.05 ? 0 : Number.POSITIVE_INFINITY) : std / Math.abs(mean);
+    const pass = ratio < 0.05;
+
+    const ratioDisplay = ratio === Number.POSITIVE_INFINITY ? '∞' : (ratio * 100).toFixed(2) + '%';
+
+    metricResults[metric] = {
+      pass,
+      mean: mean.toFixed(2),
+      std: std.toFixed(2),
+      ratio: ratioDisplay,
+      range: stat.range.toFixed(2),
+      reason: pass ? 'Pass' : 'Fail'
+    };
+
+    ratioValues.push(isFinite(ratio) ? ratio : 1); // Infinity는 fail로 처리
+    if (!pass) selectionPass = false;
+  });
+
+  const avgRatio = ratioValues.length ? ratioValues.reduce((a,b) => a + b, 0) / ratioValues.length : 0;
+  const avgStdRatioDisplay = Number.isFinite(avgRatio) ? (avgRatio * 100).toFixed(2) + '%' : 'N/A';
+
+  const finalPass = Number.isFinite(avgRatio) ? avgRatio < 0.05 : false;
+
+  const syFormat = {
+    club,
+    shots,
+    summary,
+    passFail: finalPass ? 'Pass' : 'Fail',
+    metricResults,
+    metrics: {
+      dispersionDiameter: summary.circle.diameter,
+      dispersionArea: summary.circle.area,
+      carryRange: summary.carry.range,
+      heightRange: summary.height.range,
+      sideTotalRange: summary.sideTotal.range,
+      sideSpinRange: summary.sideSpin.range,
+      avgStdRatio: avgRatio,
+      avgStdRatioDisplay,
+      advice,
+    },
+  };
+
+  return {summary, criteria:{A:{pass:passA, diameter:summary.circle.diameter, limit:dispLimit},B:advice}, finalPass, syFormat};
+}
+
+function renderTable(shots){
+  const container = document.getElementById('tableContainer');
+  if (shots.length===0){container.innerHTML='';return;}
+  const cols = selectedMetrics;
+  let html = '<table><thead><tr><th>샷</th>' + cols.map(c => `<th>${metricLabels[c] || c}</th>`).join('') + '</tr></thead><tbody>';
+  shots.forEach((s,i) => {
+    html += `<tr><td>${i+1}</td>` + cols.map(c => `<td>${s[c] !== undefined ? s[c] : ''}</td>`).join('') + '</tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function getGraphAxes() {
+  const uniqueMetrics = Array.from(new Set(selectedMetrics.filter(m => allMetrics.includes(m))));
+  return {
+    x: uniqueMetrics[0] || 'Carry',
+    y: uniqueMetrics[1] || 'SideTotal',
+    z: uniqueMetrics[2] || 'Height'
+  };
+}
+
+function renderCharts(shots, summary) {
+  const charts = document.getElementById('charts');
+  charts.innerHTML = `
+    <div class="chart-box"><canvas id="c1"></canvas></div>
+    <div class="chart-box"><canvas id="c2"></canvas></div>
+    <div class="chart-box" style="flex:1 1 100%"><canvas id="c3"></canvas></div>
+  `;
+
+  const { x: xMetric, y: yMetric, z: zMetric } = getGraphAxes();
+
+  new Chart(document.getElementById('c1'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: `${metricLabels[xMetric] || xMetric} vs ${metricLabels[yMetric] || yMetric}`,
+        data: shots.map(s => ({x: s[xMetric], y: s[yMetric]})),
+        backgroundColor: 'rgba(51,102,255,0.7)'
+      }]
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: `${metricLabels[xMetric] || xMetric} (${metricUnits[xMetric] || ''})` } },
+        y: { title: { display: true, text: `${metricLabels[yMetric] || yMetric} (${metricUnits[yMetric] || ''})` } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('c2'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: `${metricLabels[yMetric] || yMetric} vs ${metricLabels[zMetric] || zMetric}`,
+        data: shots.map(s => ({x: s[yMetric], y: s[zMetric]})),
+        backgroundColor: 'rgba(34,177,76,0.7)'
+      }]
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: `${metricLabels[yMetric] || yMetric} (${metricUnits[yMetric] || ''})` } },
+        y: { title: { display: true, text: `${metricLabels[zMetric] || zMetric} (${metricUnits[zMetric] || ''})` } }
+      }
+    }
+  });
+
+  const xPoints = shots.map(s => Number(s[xMetric]));
+  const yPoints = shots.map(s => Number(s[yMetric]));
+  const pointcloud = xPoints.map((x, i) => [x, yPoints[i]]);
+  const circle = encloseCircle(pointcloud);
+  const circlePoints = [];
+  for (let t = 0; t < 200; t++) {
+    const a = 2 * Math.PI * t / 199;
+    circlePoints.push({x: circle.center[0] + circle.r * Math.cos(a), y: circle.center[1] + circle.r * Math.sin(a)});
+  }
+
+  if (selectedMetrics.length < 3) {
+    document.getElementById('c3').parentElement.style.display = 'none';
+  } else {
+    document.getElementById('c3').parentElement.style.display = 'block';
+  }
+
+  new Chart(document.getElementById('c3'), {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {label:'데이터', data: pointcloud.map(p => ({x: p[0], y: p[1]})), pointRadius:6, backgroundColor:'rgba(237,81,73,0.9)'},
+        {label:'최소 포위 원', data: circlePoints, type:'line', borderColor:'orange', borderWidth:2, fill:false, showLine:true, pointRadius:0},
+        {label:'중심', data:[{x: circle.center[0], y: circle.center[1]}], pointRadius:8, backgroundColor:'black'}
+      ]
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: `${metricLabels[xMetric] || xMetric} (${metricUnits[xMetric] || ''})` } },
+        y: { title: { display: true, text: `${metricLabels[yMetric] || yMetric} (${metricUnits[yMetric] || ''})` } }
+      },
+      plugins: { legend: { display: true } }
+    }
+  });
+}
+
+function formatNumber(v){return (Math.round(v*100)/100).toFixed(2);} 
+
+function exportJSON(data, filename='analysis_result.json') {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function onAnalyze(shots, club) {
+  try {
+    const {summary, criteria, finalPass, syFormat} = describeShots(shots, club, selectedMetrics);
+
+    // 안전 검증: 필수 summary 항목 누락 방지
+    const requiredMetrics = ['carry','height','sideTotal','sideSpin'];
+    for (const m of requiredMetrics) {
+      if (!summary[m] || summary[m].range === undefined) {
+        throw new Error(`데이터 부족: ${m} 범위 정보가 없습니다. 10~100개 샷 데이터를 확인하세요.`);
+      }
+    }
+
+    window.lastAnalysis = { club, shots, summary, criteria, finalPass, syFormat };
+    const output = document.getElementById('output');
+    output.style.display = 'block';
+    const metricStatus = Object.entries(syFormat.metricResults || {}).map(([metric, info]) => {
+      return `<li>${metricLabels[metric] || metric}: mean ${info.mean}, std ${info.std}, ratio ${info.ratio}, range ${info.range} - <strong style="color:${info.pass ? 'green' : 'red'}">${info.reason}</strong></li>`;
+    }).join('');
+
+    const avgStdRatioText = (syFormat && syFormat.metrics && syFormat.metrics.avgStdRatioDisplay) ? syFormat.metrics.avgStdRatioDisplay : 'N/A';
+    output.innerHTML = `
+      <h2>SY-Scatter Plot 기반 샷 일관성 마스터</h2>
+      <div>클럽: ${club} / 샷: ${shots.length}</div>
+      <div>평가 요소별 평균 표준편차: ${avgStdRatioText} (${finalPass ? '합격' : '불합격'})</div>
+      <div>Dispersion Diameter: ${formatNumber(summary.circle.diameter)}m</div>
+      <div>Area: ${formatNumber(summary.circle.area)}m²</div>
+      <div>최종 판정: <strong style="color:${finalPass ? 'green':'red'}">${finalPass ? 'Pass':'Fail'}</strong></div>
+      <hr>
+      <div><strong>평가 요소별 결과</strong><ul>${metricStatus}</ul></div>
+      <hr>
+      <div>코칭 포인트: <ul>${(syFormat.metrics.advice || []).map(s => `<li>${s}</li>`).join('')}</ul></div>
+    `;
+    renderTable(shots);
+    renderCharts(shots, summary);
+  } catch (e) {
+    alert('분석 실패: ' + e);
+  }
+}
+
+const historyKey = 'ironConsistencyHistory';
+
+function saveHistory() {
+  if (!window.lastAnalysis) return alert('먼저 분석을 수행해 주세요.');
+  const data = window.lastAnalysis;
+  localStorage.setItem(historyKey, JSON.stringify(data));
+  exportJSON(data, 'analysis_history.json');
+  alert('히스토리가 저장되었습니다. localStorage + 파일로 다운로드 완료.');
+}
+
+function loadHistory(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      window.lastAnalysis = parsed;
+      document.getElementById('clubSelect').value = parsed.club;
+      window.currentShots = parsed.shots;
+      onAnalyze(parsed.shots, parsed.club);
+      alert('히스토리를 불러왔습니다.');
+    } catch (err) {
+      alert('이력 파일 파싱 실패: ' + err);
+    }
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+
+function initialize() {
+  const stored = localStorage.getItem(historyKey);
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      window.lastAnalysis = parsed;
+    } catch (e) {
+      console.warn('로컬스토리지 이력 파싱 실패', e);
+    }
+  }
+
+  // 초기값 설정
+  document.querySelector('h1').innerText = 'SY-Scatter Plot 기반 샷 일관성 마스터';
+  const backup = localStorage.getItem('shotBackup');
+  const restoreBtn = document.getElementById('restoreBackupBtn');
+  if (restoreBtn) restoreBtn.style.display = backup ? 'inline-block' : 'none';
+}
+
+initialize();
+
+function activateUnitButton(unit) {
+  const mBtn = document.getElementById('unitMBtn');
+  const ydBtn = document.getElementById('unitYdBtn');
+  if (unit === 'm') {
+    mBtn.style.background = '#0b3c68';
+    mBtn.style.color = '#fff';
+    mBtn.dataset.active = 'true';
+
+    ydBtn.style.background = '#fff';
+    ydBtn.style.color = '#0b3c68';
+    ydBtn.dataset.active = 'false';
+  } else {
+    ydBtn.style.background = '#0b3c68';
+    ydBtn.style.color = '#fff';
+    ydBtn.dataset.active = 'true';
+
+    mBtn.style.background = '#fff';
+    mBtn.style.color = '#0b3c68';
+    mBtn.dataset.active = 'false';
+  }
+}
+
+safeAddEventListener('unitMBtn', 'click', () => {
+  const prev = getSelectedUnit();
+  activateUnitButton('m');
+  if (prev !== 'm') {
+    convertAllShotsToUnit('m');
+  }
+  runShotAnalysis();
+});
+
+safeAddEventListener('unitYdBtn', 'click', () => {
+  const prev = getSelectedUnit();
+  activateUnitButton('yd');
+  if (prev !== 'yd') {
+    convertAllShotsToUnit('yd');
+  }
+  runShotAnalysis();
+});
+
+safeAddEventListener('startVMissionBtn', 'click', () => {
+  const panel = document.getElementById('virtualMissionPanel');
+  if (!panel) { alert('패널을 찾을 수 없음'); return; }
+  panel.style.display = 'block';
+  console.log('[SY-V-001] 18홀 미션 패널 오픈');
+});
+
+safeAddEventListener('closeVMissionBtn', 'click', () => {
+  document.getElementById('virtualMissionPanel').style.display = 'none';
+  document.getElementById('vMissionFrameContainer').style.display = 'none';
+  document.getElementById('vMissionIframe').src = '';
+});
+
+safeAddEventListener('closeVframeBtn', 'click', () => {
+  document.getElementById('vMissionFrameContainer').style.display = 'none';
+  document.getElementById('vMissionIframe').src = '';
+});
+
+safeAddEventListener('startVMissionGoBtn', 'click', () => {
+  const frameContainer = document.getElementById('vMissionFrameContainer');
+  const iframe = document.getElementById('vMissionIframe');
+  if (frameContainer && iframe) {
+    iframe.src = 'https://soonyongchun-dotcom.github.io/putting-training/index1.html';
+    frameContainer.style.display = 'block';
+  }
+});
+
+activateUnitButton('m');
+
+safeAddEventListener('pdfDownloadBtn', 'click', async () => {
+  if (!window.lastAnalysis) {
+    console.warn('lastAnalysis 없음, 그래도 PDF 생성 시도');
+  }
+
+  const target = document.querySelector('.container');
+  if (!target) return alert('PDF를 만들 대상 요소를 찾을 수 없습니다.');
+
+  try {
+    const timestamp = new Date();
+    const pad2 = n => n.toString().padStart(2, '0');
+    const datePart = `${timestamp.getFullYear()}${pad2(timestamp.getMonth()+1)}${pad2(timestamp.getDate())}`;
+    const timePart = `${pad2(timestamp.getHours())}${pad2(timestamp.getMinutes())}${pad2(timestamp.getSeconds())}`;
+    const missionId = document.getElementById('clubSelect')?.value || 'unknown';
+    const downloadFilename = `${missionId}_${datePart}_${timePart}.pdf`;
+
+    const headerHtml = `\n<div style=\"padding:8px; border-bottom:1px solid #ddd; margin-bottom:8px; font-size:12px;\">` +
+      `<strong>SY-Scatter Plot 기반 샷 일관성 마스터</strong><br/>` +
+      `제작일: ${timestamp.getFullYear()}-${pad2(timestamp.getMonth()+1)}-${pad2(timestamp.getDate())} ${pad2(timestamp.getHours())}:${pad2(timestamp.getMinutes())}:${pad2(timestamp.getSeconds())}<br/>` +
+      `미션 요약: 클럽=${document.getElementById('clubSelect')?.value || 'N/A'}, 샷=${document.querySelectorAll('#shotInputRows .shot-row').length || 0}, Dispersion: ${document.getElementById('dispersion')?.textContent || 'N/A'}` +
+      `</div>`;
+
+    const temp = target.cloneNode(true);
+    const existingHeader = temp.querySelector('[data-pdf-header]');
+    if (!existingHeader) {
+      const headerNode = document.createElement('div');
+      headerNode.innerHTML = headerHtml;
+      headerNode.setAttribute('data-pdf-header', 'true');
+      temp.insertBefore(headerNode, temp.firstChild);
+    }
+
+    const tmpContainer = document.createElement('div');
+    tmpContainer.style.position = 'fixed';
+    tmpContainer.style.top = '-9999px';
+    tmpContainer.style.left = '-9999px';
+    tmpContainer.appendChild(temp);
+    document.body.appendChild(tmpContainer);
+
+    const canvas = await html2canvas(temp, { scale: 2, useCORS: true });
+    document.body.removeChild(tmpContainer);
+
+    const imgData = canvas.toDataURL('image/png');
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p', 'mm', 'a4');
+
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imgProps = pdf.getImageProperties(imgData);
+    const imgWidth = pageWidth;
+    const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+
+    let position = 0;
+    let remainingHeight = imgHeight;
+
+    while (remainingHeight > 0) {
+      if (position !== 0) {
+        pdf.addPage();
+      }
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      remainingHeight -= pageHeight;
+      position -= pageHeight;
+    }
+
+    pdf.save(downloadFilename);
+  } catch (error) {
+    console.error('PDF 다운로드 중 오류 발생:', error);
+    alert('PDF 생성 중 오류가 발생했습니다. 콘솔을 확인해 주세요.');
+  }
+});
+
+safeAddEventListener('csvDownloadBtn', 'click', () => {
+  const shots = getShotRows();
+  if (!shots.length) return alert('분석할 샷을 먼저 입력하세요.');
+  const csvHeader = selectedMetrics;
+  const csvRows = shots.map(s => selectedMetrics.map(m => s[m] !== undefined ? s[m] : '').join(','));
+  const csvContent = [csvHeader.join(','), ...csvRows].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'shot_results.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// 기존 JSON/히스토리 기능 제거
+
+
+document.getElementById('clubSelect').addEventListener('change', () => {
+  const unit = getSelectedUnit();
+  const club = getSelectedClub();
+  const defaults = clubTrackmanDefault[club] || {sideTotal:0, height:20, backSpin:7000, sideSpin:150};
+  document.querySelectorAll('#shotInputRows .shot-row').forEach(row => {
+    const carryInput = row.querySelector('.carry');
+    const sideTotalInput = row.querySelector('.sideTotal');
+    const heightInput = row.querySelector('.height');
+    const backSpinInput = row.querySelector('.backSpin');
+    const sideSpinInput = row.querySelector('.sideSpin');
+
+    if (carryInput.dataset.auto === 'true' || carryInput.value === '') {
+      carryInput.value = getClubDefaultCarry(club, unit);
+    }
+    if (sideTotalInput.dataset.auto === 'true' || sideTotalInput.value === '') {
+      sideTotalInput.value = unit === 'yd' ? convertUnitValue(defaults.sideTotal, 'm', 'yd') : defaults.sideTotal;
+    }
+    if (heightInput.dataset.auto === 'true' || heightInput.value === '') {
+      heightInput.value = unit === 'yd' ? convertUnitValue(defaults.height, 'm', 'yd') : defaults.height;
+    }
+    if (backSpinInput.dataset.auto === 'true' || backSpinInput.value === '') {
+      backSpinInput.value = defaults.backSpin;
+    }
+    if (sideSpinInput.dataset.auto === 'true' || sideSpinInput.value === '') {
+      sideSpinInput.value = defaults.sideSpin;
+    }
+
+    ['carry','sideTotal','height'].forEach(k => {
+      const label = row.querySelector(`.${k}`).closest('.input-unit-outer').querySelector('.unit-inner');
+      if (label) label.innerText = unit;
+    });
+  });
+  runShotAnalysis();
+});
+
+const clubAverageMeter = {
+  D: 230,
+  W: 210,
+  U: 180,
+  W1: 95,
+  W2: 110,
+  P: 120,
+  9: 140,
+  8: 150,
+  7: 160,
+  6: 170,
+  5: 180,
+  4: 190
+};
+
+const clubTrackmanDefault = {
+  D:  {sideTotal:12, height:20, backSpin:2500, sideSpin:230},
+  W:  {sideTotal:12, height:19, backSpin:3100, sideSpin:210},
+  U:  {sideTotal:10, height:18, backSpin:4100, sideSpin:190},
+  W1: {sideTotal:10, height:22, backSpin:7400, sideSpin:180},
+  W2: {sideTotal:10, height:20, backSpin:6800, sideSpin:170},
+  P:  {sideTotal:10, height:18, backSpin:10000, sideSpin:120},
+  9:  {sideTotal:10, height:20, backSpin:8500, sideSpin:130},
+  8:  {sideTotal:10, height:21, backSpin:8300, sideSpin:130},
+  7:  {sideTotal:10, height:22, backSpin:8000, sideSpin:140},
+  6:  {sideTotal:10, height:23, backSpin:7700, sideSpin:150},
+  5:  {sideTotal:10, height:24, backSpin:7400, sideSpin:170},
+  4:  {sideTotal:10, height:25, backSpin:7100, sideSpin:180}
+};
+
+const allMetrics = ['Carry','SideTotal','Height','BackSpin','SideSpin','ClubHeadSpeed','BallSpeed','SmashFactor','LaunchAngle','AttackAngle','FaceAngle'];
+let selectedMetrics = ['Carry','SideTotal'];
+
+const metricUnits = {
+  Carry: 'm',
+  SideTotal: 'm',
+  Height: 'm',
+  BackSpin: 'rpm',
+  SideSpin: 'rpm',
+  ClubHeadSpeed: 'm/s',
+  BallSpeed: 'm/s',
+  SmashFactor: '',
+  LaunchAngle: '°',
+  AttackAngle: '°',
+  FaceAngle: '°'
+};
+
+const metricLabels = {
+  Carry: 'Carry distance',
+  SideTotal: '좌우편차',
+  Height: '최대높이',
+  BackSpin: '백스핀',
+  SideSpin: '사이드스핀',
+  ClubHeadSpeed: '클럽헤드스피드',
+  BallSpeed: '볼스피드',
+  SmashFactor: '스매쉬팩터',
+  LaunchAngle: '런치앵글',
+  AttackAngle: '어택앵글',
+  FaceAngle: '페이스앵글'
+};
+
+function buildMetricCheckboxes() {
+  const container = document.getElementById('metricCheckboxes');
+  if (!container) return;
+  container.innerHTML = '';
+  allMetrics.forEach(metric => {
+    const checked = selectedMetrics.includes(metric);
+    const disabled = metric === 'Carry' || metric === 'SideTotal';
+    const wrapper = document.createElement('label');
+    wrapper.style.display = 'inline-flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '0.2rem';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = metric;
+    checkbox.className = 'metric-checkbox';
+    checkbox.checked = checked;
+    checkbox.disabled = disabled;
+    if (disabled) checkbox.dataset.default = 'true';
+    wrapper.appendChild(checkbox);
+    wrapper.appendChild(document.createTextNode(metricLabels[metric] || metric));
+    container.appendChild(wrapper);
+  });
+}
+
+function getMetricDefault(metric, club, unit) {
+  const defaults = clubTrackmanDefault[club] || {sideTotal: 10, height: 20, backSpin: 7000, sideSpin: 150};
+  if (metric === 'Carry') return getClubDefaultCarry(club, unit);
+  if (metric === 'SideTotal') return unit === 'yd' ? convertUnitValue(defaults.sideTotal, 'm', 'yd') : defaults.sideTotal;
+  if (metric === 'Height') return unit === 'yd' ? convertUnitValue(defaults.height, 'm', 'yd') : defaults.height;
+  if (metric === 'BackSpin') return defaults.backSpin;
+  if (metric === 'SideSpin') return defaults.sideSpin;
+  if (metric === 'ClubHeadSpeed') return 45;
+  if (metric === 'BallSpeed') return 70;
+  if (metric === 'SmashFactor') return 1.5;
+  if (metric === 'LaunchAngle') return 13;
+  if (metric === 'AttackAngle') return 2;
+  if (metric === 'FaceAngle') return 0;
+  return 0;
+}
+
+function getSelectedClub() {
+  return document.getElementById('clubSelect').value;
+}
+
+function getSelectedUnit() {
+  const mBtn = document.getElementById('unitMBtn');
+  return mBtn.dataset.active === 'true' ? 'm' : 'yd';
+}
+
+function convertUnitValue(value, fromUnit, toUnit) {
+  if (value === '' || value === null || value === undefined) return value;
+  if (fromUnit === toUnit) return value;
+  const num = parseFloat(value);
+  if (Number.isNaN(num)) return value;
+  if (fromUnit === 'm' && toUnit === 'yd') return Math.round(num * 1.09361);
+  if (fromUnit === 'yd' && toUnit === 'm') return Math.round(num / 1.09361);
+  return value;
+}
+
+function getClubDefaultCarry(club, unit) {
+  let m = clubAverageMeter[club] || 140;
+  if (unit === 'yd') {
+    return Math.round(m * 1.09361);
+  }
+  return m;
+}
+
+function convertAllShotsToUnit(unit) {
+  const club = getSelectedClub();
+  const defaults = clubTrackmanDefault[club] || {sideTotal:10, height:20};
+  const rows = document.querySelectorAll('#shotInputRows .shot-row');
+  rows.forEach(row => {
+    const carryInput = row.querySelector('.carry');
+    const sideTotalInput = row.querySelector('.sideTotal');
+    const heightInput = row.querySelector('.height');
+
+    if (carryInput.dataset.auto === 'true') {
+      carryInput.value = getClubDefaultCarry(club, unit);
+    } else {
+      carryInput.value = convertUnitValue(carryInput.value, getSelectedUnit() === 'm' ? 'yd' : 'm', unit);
+    }
+
+    if (sideTotalInput.dataset.auto === 'true') {
+      sideTotalInput.value = unit === 'yd' ? convertUnitValue(defaults.sideTotal, 'm', 'yd') : defaults.sideTotal;
+    } else {
+      sideTotalInput.value = convertUnitValue(sideTotalInput.value, getSelectedUnit() === 'm' ? 'yd' : 'm', unit);
+    }
+
+    if (heightInput.dataset.auto === 'true') {
+      heightInput.value = unit === 'yd' ? convertUnitValue(defaults.height, 'm', 'yd') : defaults.height;
+    } else {
+      heightInput.value = convertUnitValue(heightInput.value, getSelectedUnit() === 'm' ? 'yd' : 'm', unit);
+    }
+
+    ['carry','sideTotal','height'].forEach(k => {
+      const label = row.querySelector(`.${k}`).closest('.input-unit-outer').querySelector('.unit-inner');
+      if (label) label.innerText = unit;
+    });
+  });
+}
+
+function createShotRow(index, averages = {}, shotValues = null) {
+  const row = document.createElement('div');
+  row.className = 'shot-row';
+  row.style.marginBottom = '0.5rem';
+  row.dataset.index = index;
+
+  const unit = getSelectedUnit();
+  const club = getSelectedClub();
+
+  let html = `<strong>샷 ${index}</strong>&nbsp;<span class='row-status'>편집중</span>`;
+
+  allMetrics.forEach(metric => {
+    const lower = metric.toLowerCase();
+    let value = shotValues && shotValues[metric] !== undefined ? shotValues[metric] : getMetricDefault(metric, club, unit);
+    if (!shotValues && metric === 'SideTotal' && Number.isFinite(averages[metric])) {
+      value = Number(averages[metric].toFixed(1));
+    }
+    const display = selectedMetrics.includes(metric) ? 'inline-flex' : 'none';
+    const unitLabel = (metric === 'Carry' || metric === 'SideTotal' || metric === 'Height') ? unit : (metricUnits[metric] || '');
+    const step = (metric === 'BackSpin' || metric === 'SideSpin') ? '50' : ((metric === 'SmashFactor' || metric === 'SideTotal') ? '0.1' : '1');
+
+    html += `
+      <span class='input-unit-outer metric-field metric-${lower}' style='display:${display};'>${metricLabels[metric] || metric}
+        <input type='number' class='shot-input ${lower} metric-${lower}' step='${step}' value='${value}' style='width:80px;' />
+        <span class='unit-inner'>${unitLabel}</span>
+      </span>`;
+  });
+
+  html += "<button type='button' class='shot-btn delete-btn' style='margin-left:4px;'>삭제</button>";
+
+  row.innerHTML = html;
+
+  row.querySelectorAll('input.shot-input').forEach(inp => {
+    inp.dataset.auto = 'true';
+    inp.addEventListener('input', () => {
+      inp.dataset.auto = 'false';
+      runShotAnalysis();
+    });
+  });
+
+  row.querySelector('.delete-btn').addEventListener('click', () => {
+    row.remove();
+    updateShotCountLabel();
+    runShotAnalysis();
+  });
+
+  return row;
+}
+
+function markAllRowsSaved() {
+  document.querySelectorAll('#shotInputRows .shot-row').forEach(row => {
+    row.classList.add('saved');
+    row.querySelectorAll('input').forEach(input => {
+      input.readOnly = true;
+      input.classList.add('readonly');
+    });
+    const status = row.querySelector('.row-status');
+    if (status) status.innerText = '저장됨 ✔';
+  });
+}
+
+function validateShotRows() {
+  const rows = document.querySelectorAll('#shotInputRows .shot-row');
+  for (const row of rows) {
+    for (const metric of allMetrics) {
+      const cls = metric.toLowerCase();
+      const input = row.querySelector(`.${cls}`);
+      if (!input) continue;
+      const value = parseFloat(input.value);
+      if (Number.isNaN(value)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function getShotRows() {
+  const nodes = Array.from(document.querySelectorAll('#shotInputRows .shot-row'));
+  const shots = [];
+  for (const row of nodes) {
+    const shot = {};
+    for (const metric of allMetrics) {
+      const cls = metric.toLowerCase();
+      const input = row.querySelector(`.${cls}`);
+      if (input) {
+        const v = parseFloat(input.value);
+        shot[metric] = Number.isNaN(v) ? 0 : v;
+      } else {
+        shot[metric] = 0;
+      }
+    }
+    if (Number.isNaN(shot.Carry) || Number.isNaN(shot.SideTotal)) continue;
+    shots.push(shot);
+  }
+  return shots;
+}
+
+function getMetricAverages(metrics = []) {
+  const shots = getShotRows();
+  const averages = {};
+  metrics.forEach(metric => {
+    const values = shots.map(s => Number(s[metric])).filter(Number.isFinite);
+    if (values.length > 0) {
+      averages[metric] = values.reduce((a,b) => a+b,0)/values.length;
+    }
+  });
+  return averages;
+}
+
+function saveShotBackup() {
+  const shots = getShotRows();
+  localStorage.setItem('shotBackup', JSON.stringify({shots, selectedMetrics}));
+  const btn = document.getElementById('restoreBackupBtn');
+  if (btn) btn.style.display = shots.length > 0 ? 'inline-block' : 'none';
+}
+
+function restoreShotBackup() {
+  const backupRaw = localStorage.getItem('shotBackup');
+  if (!backupRaw) {
+    alert('복원할 데이터가 없습니다.');
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(backupRaw);
+    if (!parsed.shots || !Array.isArray(parsed.shots)) {
+      alert('복원 데이터 형식이 올바르지 않습니다.');
+      return;
+    }
+    if (Array.isArray(parsed.selectedMetrics) && parsed.selectedMetrics.length > 0) {
+      selectedMetrics = parsed.selectedMetrics;
+    }
+
+    const container = document.getElementById('shotInputRows');
+    if (!container) return;
+    container.innerHTML = '';
+    container.style.display = 'block';
+
+    parsed.shots.forEach((shot, idx) => {
+      const row = createShotRow(idx + 1, {}, shot);
+      container.appendChild(row);
+    });
+
+    updateShotCountLabel();
+    runShotAnalysis();
+    alert('데이터를 복원했습니다.');
+  } catch (e) {
+    console.error('restoreShotBackup error', e);
+    alert('복원 실패: ' + e);
+  }
+}
+
+safeAddEventListener('restoreBackupBtn', 'click', restoreShotBackup);
+
+function updateShotCountLabel() {
+  const shotRows = document.querySelectorAll('#shotInputRows .shot-row').length;
+  const badge = document.getElementById('shotCountBadge');
+  if (badge) {
+    badge.innerText = `샷 ${shotRows}/100`;
+    badge.style.background = shotRows >= 90 ? '#b71c1c' : (shotRows >= 50 ? '#f57f17' : '#0b3c68');
+  }
+  const countLabel = document.getElementById('shotCountLabel');
+  if (countLabel) {
+    countLabel.innerText = `(샷 ${shotRows}/100)`;
+  }
+  const addShotBtn = document.getElementById('addShotBtn');
+  if (addShotBtn) addShotBtn.disabled = shotRows >= 100;
+}
+
+function runShotAnalysis() {
+  const shots = getShotRows();
+  updateShotCountLabel();
+  saveShotBackup();
+  const output = document.getElementById('output');
+  if (shots.length >= 10) {
+    onAnalyze(shots, document.getElementById('clubSelect').value);
+  } else {
+    output.style.display = 'none';
+  }
+}
+
+safeAddEventListener('startMissionBtn', 'click', () => {
+  saveShotBackup();
+  document.getElementById('metricSelectionPanel').style.display = 'block';
+  document.getElementById('shotInputRowsWrapper').style.display = 'none';
+  document.getElementById('addShotBtn').disabled = true;
+  document.getElementById('addShotBtn').style.visibility = 'hidden';
+  document.getElementById('output').style.display = 'none';
+  const container = document.getElementById('shotInputRows');
+  if (container) container.innerHTML = '';
+  buildMetricCheckboxes();
+});
+
+safeAddEventListener('confirmMetricsBtn', 'click', () => {
+  const chosen = Array.from(document.querySelectorAll('.metric-checkbox:checked')).map(c => c.value);
+  if (!chosen.includes('Carry')) chosen.unshift('Carry');
+  if (!chosen.includes('SideTotal')) chosen.unshift('SideTotal');
+  if (chosen.length < 3 || chosen.length > 4) {
+    return alert('Carry + SideTotal 포함 총 3~4개 항목을 선택해 주세요.');
+  }
+  selectedMetrics = chosen;
+  document.getElementById('metricSelectionPanel').style.display = 'none';
+  const wrapper = document.getElementById('shotInputRowsWrapper');
+  const container = document.getElementById('shotInputRows');
+  if (!wrapper || !container) return;
+  wrapper.style.display = 'block';
+  container.innerHTML = '';
+  const averages = getMetricAverages(['SideTotal']);
+  container.appendChild(createShotRow(1, averages));
+  updateShotCountLabel();
+  const addShotBtn = document.getElementById('addShotBtn');
+  if (addShotBtn) {
+    addShotBtn.disabled = false;
+    addShotBtn.style.visibility = 'visible';
+  }
+  runShotAnalysis();
+});
+
+safeAddEventListener('addShotBtn', 'click', () => {
+  const container = document.getElementById('shotInputRows');
+  if (!container) return;
+  if (!validateShotRows()) {
+    alert('모든 샷 입력 필드를 정확하게 채운 후 샷을 추가해 주세요.');
+    return;
+  }
+  markAllRowsSaved();
+  const nextIndex = container.querySelectorAll('.shot-row').length + 1;
+  if (nextIndex > 100) return;
+  const averages = getMetricAverages(['SideTotal']);
+  const newRow = createShotRow(nextIndex, averages);
+  container.insertBefore(newRow, container.firstChild);
+  updateShotCountLabel();
+  runShotAnalysis();
+});
+
+safeAddEventListener('resetAllBtn', 'click', () => {
+  const container = document.getElementById('shotInputRows');
+  if (container) container.innerHTML = '';
+  const wrapper = document.getElementById('shotInputRowsWrapper');
+  if (wrapper) wrapper.style.display = 'none';
+  const addShotBtn = document.getElementById('addShotBtn');
+  if (addShotBtn) { addShotBtn.disabled = true; addShotBtn.style.visibility = 'hidden'; }
+  const shotCount = document.getElementById('shotCountLabel');
+  if (shotCount) shotCount.innerText = '(샷 0/100)';
+  const output = document.getElementById('output');
+  if (output) output.style.display = 'none';
+  const table = document.getElementById('tableContainer');
+  if (table) table.innerHTML = '';
+  const charts = document.getElementById('charts');
+  if (charts) charts.innerHTML = '';
+  const club = document.getElementById('clubSelect');
+  if (club) club.value = 'W1';
+  activateUnitButton('m');
+});
+
+safeAddEventListener('csvInput', 'change', ev => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const rows = parseCSV(reader.result);
+    if (rows.length < 10 || rows.length > 100) {
+      alert('샷은 10개 이상 최대 100개까지 입력 가능합니다. 현재: ' + rows.length);
+      return;
+    }
+    if (rows.length > 100) {
+      alert('100개 초과하는 샷은 첫 100개만 분석합니다. 현재: ' + rows.length);
+    }
+    window.currentShots = rows.slice(0,100); // global 저장
+    onAnalyze(window.currentShots, document.getElementById('clubSelect').value);
+  };
+  reader.readAsText(file, 'utf-8');
+});
+
+document.getElementById('loadSampleBtn').addEventListener('click', () => {
+  const sample = [
+    {Carry:140.3,SideTotal:0.8,Height:21.3,BackSpin:6100,SideSpin:180},
+    {Carry:139.8,SideTotal:-1.1,Height:20.7,BackSpin:6050,SideSpin:140},
+    {Carry:138.4,SideTotal:0.3,Height:20.1,BackSpin:6200,SideSpin:200},
+    {Carry:141.7,SideTotal:-0.5,Height:21.0,BackSpin:6150,SideSpin:150},
+    {Carry:139.9,SideTotal:0.7,Height:20.8,BackSpin:6080,SideSpin:170},
+    {Carry:140.9,SideTotal:-0.3,Height:21.5,BackSpin:6120,SideSpin:160},
+    {Carry:138.6,SideTotal:0.4,Height:20.3,BackSpin:6180,SideSpin:190},
+    {Carry:140.1,SideTotal:0.0,Height:20.9,BackSpin:6105,SideSpin:175},
+    {Carry:139.2,SideTotal:-0.7,Height:20.6,BackSpin:6090,SideSpin:160},
+    {Carry:140.5,SideTotal:0.2,Height:20.4,BackSpin:6145,SideSpin:165}
+  ];
+  window.currentShots = sample;
+  onAnalyze(sample, document.getElementById('clubSelect').value);
+});
+
+document.getElementById('computeBtn').addEventListener('click', () => {
+  const shots = window.currentShots;
+  if (!shots || shots.length !== 10) {
+    alert('샘플을 로드하거나 CSV를 선택해 주세요 (10개 행)');
+    return;
+  }
+  onAnalyze(shots, document.getElementById('clubSelect').value);
+});
+</script>
+</body>
+</html>

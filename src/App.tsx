@@ -9,6 +9,7 @@ type SubCategory =
   | 'iron'
   | 'putting'
   | 'spin'
+  | 'shot_consistency'
   | '18hole'
   | 'chipside'
   | 'approach'
@@ -33,7 +34,8 @@ const subcategories: Record<Category, { key: SubCategory; label: string }[]> = {
     { key: 'driver', label: '드라이버 미션' },
     { key: 'iron', label: '아이언 미션' },
     { key: 'putting', label: '퍼팅 미션' },
-    { key: 'spin', label: '스핀샷 미션' }
+    { key: 'spin', label: '스핀샷 미션' },
+    { key: 'shot_consistency', label: '샷 일관성 미션' }
   ],
   game: [
     { key: '18hole', label: '18홀 가상 라운드' },
@@ -87,6 +89,10 @@ function App() {
   const [coachFeedback, setCoachFeedback] = useState<Record<number, string>>({});
   const [playerMissionNotes, setPlayerMissionNotes] = useState<Record<number, string>>({});
   const [playerMissionFiles, setPlayerMissionFiles] = useState<Record<number, File[]>>({});
+
+  const [showShotConsistencyPanel, setShowShotConsistencyPanel] = useState(false);
+  const [shotConsistencyUrl, setShotConsistencyUrl] = useState('');
+  const [shotPanelMode, setShotPanelMode] = useState<'fullscreen' | 'window'>('window');
   const [playerReply, setPlayerReply] = useState<Record<number, string>>({});
   const [showVerificationPanel, setShowVerificationPanel] = useState(false);
   const [selectedMissionId, setSelectedMissionId] = useState<number | null>(null);
@@ -1041,6 +1047,40 @@ function App() {
     return player.id;
   };
 
+  const openShotConsistencyTool = async () => {
+    const localUrl = 'file:///C:/workspace/scatter_consistency_master_ui.html';
+    const basePath = window.location.pathname.replace(/\/[^/]*$/, '');
+    const normalizedBase = basePath.endsWith('/') ? basePath : `${basePath}/`;
+    const currentBaseUrl = `${window.location.origin}${normalizedBase}scatter_consistency_master_ui.html`;
+    const missionProjectBaseUrl = `${window.location.origin}/Mission-project/scatter_consistency_master_ui.html`;
+
+    const candidates = [currentBaseUrl, missionProjectBaseUrl, localUrl];
+
+    for (const candidate of candidates) {
+      if (candidate.startsWith('file://')) {
+        // file://는 fetch로 접근 불가할 수 있으므로 iframe 모드에서도 사용 어려움
+        continue;
+      }
+
+      try {
+        const res = await fetch(candidate, { method: 'GET' });
+        if (!res.ok) continue;
+        const text = await res.text();
+        const isAppIndex = text.includes('<div id="root"></div>') && text.includes('src="./src/main.tsx"');
+        if (isAppIndex) continue;
+
+        setShotConsistencyUrl(candidate);
+        setShotPanelMode('window');
+        setShowShotConsistencyPanel(true);
+        return;
+      } catch (error) {
+        continue;
+      }
+    }
+
+    alert('샷 일관성 도구를 찾을 수 없습니다. public 폴더에 scatter_consistency_master_ui.html을 두고 테스트하세요. (예: http://localhost:5174/Mission-project/scatter_consistency_master_ui.html)');
+  };
+
   return (
     <div style={{
       minHeight: '100vh',
@@ -1050,6 +1090,59 @@ function App() {
       justifyContent: 'center',
       boxSizing: 'border-box',
     }}>
+      {showShotConsistencyPanel && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          background: 'rgba(0,0,0,0.65)',
+          zIndex: 9999,
+          display: 'flex',
+          flexDirection: 'column',
+        }}>
+          <div style={{
+            borderBottom: '1px solid #ccc',
+            background: '#fff',
+            padding: '10px 12px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <strong style={{ fontSize: 14, marginRight: 8 }}>샷 일관성 도구</strong>
+              <button onClick={() => setShotPanelMode(prev => (prev === 'fullscreen' ? 'window' : 'fullscreen'))} style={{ padding: '4px 8px' }}>
+                {shotPanelMode === 'fullscreen' ? '창모드' : '전체화면'}
+              </button>
+            </div>
+            <button onClick={() => setShowShotConsistencyPanel(false)} style={{ padding: '6px 10px' }}>
+              닫기
+            </button>
+          </div>
+          <div style={{
+            background: '#fff',
+            flex: 1,
+            overflow: 'auto',
+            padding: 10,
+            boxSizing: 'border-box',
+            width: shotPanelMode === 'fullscreen' ? '100%' : '80%',
+            height: shotPanelMode === 'fullscreen' ? '100%' : '80%',
+            margin: shotPanelMode === 'fullscreen' ? 0 : 'auto',
+            boxShadow: shotPanelMode === 'fullscreen' ? 'none' : '0 0 16px rgba(0,0,0,0.2)',
+            borderRadius: shotPanelMode === 'fullscreen' ? 0 : 12,
+          }}>
+            <div style={{ marginBottom: 8, fontSize: 12, color: '#555' }}>
+              * 외부 도구를 iframe으로 로드합니다.
+            </div>
+            <iframe
+              src={shotConsistencyUrl}
+              style={{ width: '100%', height: '100%', border: 0 }}
+              title="샷 일관성 도구"
+            />
+          </div>
+        </div>
+      )}
       <style>{`
         :root { --background: linear-gradient(180deg, #eff5ff 0%, #f7fbff 100%); }
         body { background: var(--background); }
@@ -1246,6 +1339,9 @@ function App() {
                   onClick={() => {
                     setSubcategory(item.key);
                     setShowSubcategoryDropdown(false);
+                    if (item.key === 'shot_consistency') {
+                      openShotConsistencyTool();
+                    }
                   }}
                 >
                   {item.label}
@@ -1360,6 +1456,14 @@ function App() {
                       </p>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {m.subcategory === 'shot_consistency' && (
+                        <button
+                          style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#28a745', color: '#fff' }}
+                          onClick={openShotConsistencyTool}
+                        >
+                          샷 일관성 도구 실행
+                        </button>
+                      )}
                       {m.assigned_to === '미정' ? (
                         <button
                           style={{ fontSize: '0.8rem', padding: '4px 8px' }}
@@ -1530,9 +1634,16 @@ function App() {
                     <p style={{ margin: '0 0 8px 0' }}>{latest.description}</p>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <p style={{ margin: 0, color: '#555' }}>ID: #{latest.id} / 등록: {latest.inserted_at ? formatTimeDistance(latest.inserted_at) : '-'}</p>
-                      <button onClick={() => markMissionViewed(latest.id)} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
-                        확인
-                      </button>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        {latest.subcategory === 'shot_consistency' && (
+                          <button onClick={openShotConsistencyTool} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
+                            샷 일관성 도구 실행
+                          </button>
+                        )}
+                        <button onClick={() => markMissionViewed(latest.id)} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
+                          확인
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -1558,6 +1669,11 @@ function App() {
                           </div>
                         </div>
                         <p style={{ margin: '4px 0', color: '#666' }}>{m.description}</p>
+                        {m.subcategory === 'shot_consistency' && (
+                          <button onClick={openShotConsistencyTool} style={{ fontSize: '0.8rem', padding: '4px 8px', marginTop: 4 }}>
+                            샷 일관성 도구 실행
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
