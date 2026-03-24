@@ -995,10 +995,18 @@ function createShotRow(index, averages = {}, shotValues = null) {
 
   allMetrics.forEach(metric => {
     const lower = metric.toLowerCase();
-    let value = shotValues && shotValues[metric] !== undefined ? shotValues[metric] : getMetricDefault(metric, club, unit);
-    if (!shotValues && metric === 'SideTotal' && Number.isFinite(averages[metric])) {
-      value = Number(averages[metric].toFixed(1));
+
+    let value = getMetricDefault(metric, club, unit);
+
+    if (shotValues && shotValues[metric] !== undefined && shotValues[metric] !== null && shotValues[metric] !== '') {
+      value = shotValues[metric];
+    } else if (!shotValues && averages && Number.isFinite(averages[metric])) {
+      value = Number(averages[metric]);
+      if (metric === 'SideTotal' || metric === 'Carry' || metric === 'Height') {
+        value = Number(value.toFixed(1));
+      }
     }
+
     const display = selectedMetrics.includes(metric) ? 'inline-flex' : 'none';
     const unitLabel = (metric === 'Carry' || metric === 'SideTotal' || metric === 'Height') ? unit : (metricUnits[metric] || '');
     const step = (metric === 'BackSpin' || metric === 'SideSpin') ? '50' : ((metric === 'SmashFactor' || metric === 'SideTotal') ? '0.1' : '1');
@@ -1090,6 +1098,21 @@ function getMetricAverages(metrics = []) {
     }
   });
   return averages;
+}
+
+function getLastShotValues() {
+  const firstRow = document.querySelector('#shotInputRows .shot-row');
+  if (!firstRow) return null;
+
+  const shot = {};
+  allMetrics.forEach(metric => {
+    const input = firstRow.querySelector(`.${metric.toLowerCase()}`);
+    if (input && input.value !== '') {
+      const num = Number(input.value);
+      shot[metric] = Number.isFinite(num) ? num : input.value;
+    }
+  });
+  return shot;
 }
 
 function saveShotBackup() {
@@ -1190,7 +1213,9 @@ safeAddEventListener('confirmMetricsBtn', 'click', () => {
   if (!wrapper || !container) return;
   wrapper.style.display = 'block';
   container.innerHTML = '';
-  const averages = getMetricAverages(['SideTotal']);
+
+  // 첫 시작 샷은 이전 입력 없으면 평균값 기반으로 채움
+  const averages = getMetricAverages(selectedMetrics);
   container.appendChild(createShotRow(1, averages));
   updateShotCountLabel();
   const addShotBtn = document.getElementById('addShotBtn');
@@ -1211,8 +1236,9 @@ safeAddEventListener('addShotBtn', 'click', () => {
   markAllRowsSaved();
   const nextIndex = container.querySelectorAll('.shot-row').length + 1;
   if (nextIndex > 100) return;
-  const averages = getMetricAverages(['SideTotal']);
-  const newRow = createShotRow(nextIndex, averages);
+
+  const previousShotValues = getLastShotValues();
+  const newRow = createShotRow(nextIndex, {}, previousShotValues);
   container.insertBefore(newRow, container.firstChild);
   updateShotCountLabel();
   runShotAnalysis();
