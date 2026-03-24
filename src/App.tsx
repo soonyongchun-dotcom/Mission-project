@@ -81,7 +81,9 @@ function App() {
   const [players, setPlayers] = useState<User[]>([]);
   const [newMission, setNewMission] = useState({ id: '', title: '', description: '' });
   const [assignTo, setAssignTo] = useState('all');
-  const [missionFiles, setMissionFiles] = useState<FileList | null>(null);
+  const UNASSIGNED_CODE = 'unassigned';
+  const UNASSIGNED_LABEL = '미정';
+  const [missionFiles, setMissionFiles] = useState<File[]>([]);
   const [storageBucket, setStorageBucket] = useState('mission-files');
   const [missionLogs, setMissionLogs] = useState<MissionLog[]>([]);
   const [assignModalMission, setAssignModalMission] = useState<Mission | null>(null);
@@ -113,6 +115,14 @@ function App() {
     return categoryFiltered;
   }, [missions, category, subcategory, role, currentPlayer]);
 
+  const unassignedMissions = useMemo(() => {
+    return filteredMissions.filter(m => m.assigned_to === UNASSIGNED_CODE || m.assigned_to === UNASSIGNED_LABEL);
+  }, [filteredMissions]);
+
+  const assignedMissions = useMemo(() => {
+    return filteredMissions.filter(m => !(m.assigned_to === UNASSIGNED_CODE || m.assigned_to === UNASSIGNED_LABEL));
+  }, [filteredMissions]);
+
   const visibleMissions = selectedMissionId !== null ? filteredMissions.filter(m => m.id === selectedMissionId) : [];
 
   const loadMissions = async () => {
@@ -128,13 +138,14 @@ function App() {
 
     if (data) {
       const missionsWithNames = (data as Mission[]).map(m => {
-        const player = players.find(p => p.id === m.assigned_to);
+        const normalizedAssignedTo = m.assigned_to === UNASSIGNED_LABEL ? UNASSIGNED_CODE : m.assigned_to;
+        const player = players.find(p => p.id === normalizedAssignedTo);
         const assignedName = player
           ? player.display_name || player.username || player.id
-          : m.assigned_to === '미정'
-          ? '미정'
-          : m.assigned_to;
-        return { ...m, assigned_name: assignedName };
+          : normalizedAssignedTo === UNASSIGNED_CODE
+          ? UNASSIGNED_LABEL
+          : normalizedAssignedTo;
+        return { ...m, assigned_to: normalizedAssignedTo, assigned_name: assignedName };
       });
       setMissions(missionsWithNames);
     }
@@ -167,47 +178,27 @@ function App() {
     try {
       const { data: buckets, error: listError } = await supabase.storage.listBuckets();
       if (listError) {
-        console.warn('버킷 목록 조회 실패:', listError);
+        console.warn('버킷 목록 조회 실패 (읽기 권한 문제 가능):', listError);
       }
+
       if (buckets?.some(b => b.name === 'mission-files')) {
         setStorageBucket('mission-files');
         return;
       }
+
       if (buckets?.some(b => b.name === 'attachments')) {
         setStorageBucket('attachments');
         return;
       }
+
+      console.warn('기존 버킷이 없거나 권한 없음. mission-files를 사용하여 업로드 시도합니다.');
+      setStorageBucket('mission-files');
+      return;
     } catch (bucketError) {
-      console.warn('버킷 목록 조회 실패(권한 이슈 가능). mission-files 우선 사용 시도:', bucketError);
+      console.warn('버킷 목록 조회 중 예외(권한 제한 가능). mission-files 우선 사용:', bucketError);
+      setStorageBucket('mission-files');
+      return;
     }
-
-    // 없으면 일단 mission-files 시도
-    try {
-      const { data: created, error: createError } = await supabase.storage.createBucket('mission-files', { public: true });
-      if (!createError) {
-        setStorageBucket('mission-files');
-        console.info('mission-files 버킷 생성 완료:', created);
-        return;
-      }
-      console.warn('mission-files 버킷 생성 실패:', createError);
-    } catch (createError) {
-      console.warn('mission-files 버킷 생성 예외:', createError);
-    }
-
-    // mission-files 생성 실패시 attachments 시도
-    try {
-      const { data: created, error: createError } = await supabase.storage.createBucket('attachments', { public: true });
-      if (!createError) {
-        setStorageBucket('attachments');
-        console.info('attachments 버킷 생성 완료:', created);
-        return;
-      }
-      console.warn('attachments 버킷 생성 실패:', createError);
-    } catch (createError) {
-      console.warn('attachments 버킷 생성 예외:', createError);
-    }
-
-    setStorageBucket('mission-files');
   };
 
   const getAttachmentUrl = async (path: string, bucketHint?: string): Promise<string> => {
@@ -287,7 +278,18 @@ function App() {
     for (const url of urlCandidates) {
       try {
         console.debug('openAttachment 시도 URL:', url);
-        window.open(url, '_blank');
+        const opened = window.open(url, '_blank');
+        if (!opened) {
+          // 팝업 차단 등으로 새 탭 열기 실패하면 강제 파일 링크 클릭
+          const a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noreferrer';
+          a.download = file.name || '';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
         return;
       } catch (err) {
         console.debug('openAttachment URL 실패:', url, err);
@@ -414,7 +416,12 @@ function App() {
     }
 
     if (!newMission.title.trim() || !newMission.description.trim()) {
-      alert('모든 미션 정보를 입력해주세요.');
+      alert('미션 제목/설명을 모두 입력해주세요.');
+      return;
+    }
+
+    if (!category || !subcategory) {
+      alert('카테고리와 서브카테고리를 선택해주세요.');
       return;
     }
 
@@ -424,8 +431,9 @@ function App() {
       category,
       subcategory,
       created_by: currentCoach,
-      assigned_to: assignTo === 'unassigned' ? '미정' : assignTo,
-      attachments: []
+      assigned_to: assignTo,
+      attachments: [],
+      inserted_at: new Date().toISOString()
     };
 
     if (newMission.id.trim()) {
@@ -467,7 +475,7 @@ function App() {
       }
 
       try {
-        mission.attachments = await uploadMissionFiles(Array.from(missionFiles));
+        mission.attachments = await uploadMissionFiles(missionFiles);
       } catch (uploadError: any) {
         console.error('파일 업로드 실패:', uploadError);
         alert('파일 업로드 중 오류가 발생했습니다. 콘솔을 확인하세요: ' + (uploadError?.message || uploadError));
@@ -484,7 +492,7 @@ function App() {
 
     setNewMission({ id: '', title: '', description: '' });
     setAssignTo('all');
-    setMissionFiles(null);
+    setMissionFiles([]);
     loadMissions();
   };
 
@@ -497,27 +505,38 @@ function App() {
 
     for (let idx = 0; idx < files.length && idx < 3; idx++) {
       const file = files[idx];
-      const filePath = `player_${Date.now()}_${file.name}`;
+      const randomId = Math.random().toString(36).slice(2, 10);
+      const timestamp = Date.now();
+      const sanitizedName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = `mission_${timestamp}_${randomId}_${idx}_${sanitizedName}`;
 
+      const bucketCandidates = [storageBucket, 'mission-files', 'attachments'];
+      let uploadResult: any = { error: null };
       let usedBucket = storageBucket;
-      let uploadResult = await supabase.storage
-        .from(usedBucket)
-        .upload(filePath, file, { cacheControl: '3600', upsert: false });
 
-      if (uploadResult.error) {
-        // mission-files 버킷이 없는 경우 attachments로 폴백
-        if (uploadResult.error.message?.includes('Bucket not found') && usedBucket === 'mission-files') {
-          console.warn('mission-files 버킷 없음, attachments로 폴백합니다.');
-          usedBucket = 'attachments';
-          setStorageBucket('attachments');
+      for (const bucket of bucketCandidates) {
+        if (!bucket) continue;
+        try {
           uploadResult = await supabase.storage
-            .from(usedBucket)
+            .from(bucket)
             .upload(filePath, file, { cacheControl: '3600', upsert: false });
+          if (!uploadResult.error) {
+            usedBucket = bucket;
+            if (bucket !== storageBucket) {
+              setStorageBucket(bucket);
+            }
+            break;
+          } else {
+            console.warn(`파일 업로드 실패 (${bucket}):`, uploadResult.error);
+          }
+        } catch (err) {
+          console.warn(`파일 업로드 예외 (${bucket}):`, err);
+          uploadResult = { error: err };
         }
       }
 
       if (uploadResult.error) {
-        console.error('파일 업로드 실패:', uploadResult.error);
+        console.error('파일 업로드 실패: 모든 버킷 실패', uploadResult.error);
         throw uploadResult.error;
       }
 
@@ -707,9 +726,60 @@ function App() {
     setAssignTarget('');
   };
 
+  const getNextMissionId = async () => {
+    try {
+      const { data: maxIdData, error: maxIdError } = await supabase
+        .from('missions')
+        .select('id')
+        .order('id', { ascending: false })
+        .limit(1);
+
+      if (maxIdError) {
+        console.warn('max id 조회 실패, fallback으로 timestamp id 사용:', maxIdError);
+        return Math.floor(Date.now() / 1000);
+      }
+
+      return (maxIdData?.[0]?.id ?? 0) + 1;
+    } catch (e) {
+      console.warn('max id 조회 중 예외, timestamp id 사용:', e);
+      return Math.floor(Date.now() / 1000);
+    }
+  };
+
   const assignSelectedPlayer = async () => {
     if (!assignModalMission || !assignTarget) {
       alert('선수를 선택하세요.');
+      return;
+    }
+
+    const isUnassignedMission =
+      assignModalMission.assigned_to === UNASSIGNED_CODE ||
+      assignModalMission.assigned_to === UNASSIGNED_LABEL;
+
+    if (isUnassignedMission) {
+      const nextId = await getNextMissionId();
+      const newMission: any = {
+        id: nextId,
+        title: assignModalMission.title,
+        description: assignModalMission.description,
+        category: assignModalMission.category,
+        subcategory: assignModalMission.subcategory,
+        created_by: assignModalMission.created_by,
+        assigned_to: assignTarget,
+        attachments: assignModalMission.attachments || [],
+        inserted_at: new Date().toISOString(),
+      };
+
+      const { error } = await supabase.from('missions').insert(newMission);
+      if (error) {
+        alert('미션 복사 및 선수 지정 실패: ' + error.message);
+        console.error('미션 할당 오류:', error);
+        return;
+      }
+
+      alert('미정 미션을 새로운 선수 할당 미션으로 복사했습니다. 원본 미정 미션은 유지됩니다.');
+      setAssignModalMission(null);
+      loadMissions();
       return;
     }
 
@@ -1362,41 +1432,94 @@ function App() {
             </span>
           </div>
 
-          <div style={{ maxHeight: 220, overflowY: 'auto', overflowX: 'hidden', border: '1px solid #ddd', borderRadius: 6, marginBottom: 16 }}>
-            <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: '0.92rem' }}>
-              <colgroup>
-                <col style={{ width: '14.2857%' }} />
-                <col style={{ width: '42.8571%' }} />
-                <col style={{ width: '14.2857%' }} />
-                <col style={{ width: '28.5714%' }} />
-              </colgroup>
-              <thead>
-                <tr style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1 }}>
-                  <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>ID</th>
-                  <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>제목</th>
-                  <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>할당</th>
-                  <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>등록일</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredMissions.map(m => (
-                  <tr
-                    key={m.id}
-                    onClick={() => setSelectedMissionId(m.id)}
-                    style={{
-                      cursor: 'pointer',
-                      background: selectedMissionId === m.id ? '#eef6ff' : '#fff',
-                      borderBottom: '1px solid #f0f0f0'
-                    }}
-                  >
-                    <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>#{m.id}</td>
-                    <td style={{ padding: '6px 8px', width: '42.8571%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.title}</td>
-                    <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.assigned_to === '미정' ? '미정' : getPlayerLabel(m.assigned_to)}</td>
-                    <td style={{ padding: '6px 8px', width: '28.5714%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.inserted_at ? new Date(m.inserted_at).toLocaleString() : '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ marginBottom: 16 }}>
+            {unassignedMissions.length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <h4 style={{ margin: '0 0 8px 0' }}>미션 저장소</h4>
+                <div style={{ maxHeight: 160, overflowY: 'auto', overflowX: 'hidden', border: '1px solid #ddd', borderRadius: 6 }}>
+                  <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: '0.92rem' }}>
+                    <colgroup>
+                      <col style={{ width: '14.2857%' }} />
+                      <col style={{ width: '42.8571%' }} />
+                      <col style={{ width: '14.2857%' }} />
+                      <col style={{ width: '28.5714%' }} />
+                    </colgroup>
+                    <thead>
+                      <tr style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1 }}>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>ID</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>제목</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>할당</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>등록일</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unassignedMissions.map(m => (
+                        <tr
+                          key={`unassigned-${m.id}`}
+                          onClick={() => setSelectedMissionId(m.id)}
+                          style={{
+                            cursor: 'pointer',
+                            background: selectedMissionId === m.id ? '#eef6ff' : '#fff',
+                            borderBottom: '1px solid #f0f0f0'
+                          }}
+                        >
+                          <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>#{m.id}</td>
+                          <td style={{ padding: '6px 8px', width: '42.8571%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.title}</td>
+                          <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{UNASSIGNED_LABEL}</td>
+                          <td style={{ padding: '6px 8px', width: '28.5714%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.inserted_at ? new Date(m.inserted_at).toLocaleString() : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {assignedMissions.length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <h4 style={{ margin: '0 0 8px 0' }}>지정된 미션</h4>
+                <div style={{ maxHeight: 160, overflowY: 'auto', overflowX: 'hidden', border: '1px solid #ddd', borderRadius: 6 }}>
+                  <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: '0.92rem' }}>
+                    <colgroup>
+                      <col style={{ width: '14.2857%' }} />
+                      <col style={{ width: '42.8571%' }} />
+                      <col style={{ width: '14.2857%' }} />
+                      <col style={{ width: '28.5714%' }} />
+                    </colgroup>
+                    <thead>
+                      <tr style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1 }}>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>ID</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>제목</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>할당</th>
+                        <th style={{ textAlign: 'left', padding: '7px 8px', borderBottom: '1px solid #ccc' }}>등록일</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {assignedMissions.map(m => (
+                        <tr
+                          key={`assigned-${m.id}`}
+                          onClick={() => setSelectedMissionId(m.id)}
+                          style={{
+                            cursor: 'pointer',
+                            background: selectedMissionId === m.id ? '#eef6ff' : '#fff',
+                            borderBottom: '1px solid #f0f0f0'
+                          }}
+                        >
+                          <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>#{m.id}</td>
+                          <td style={{ padding: '6px 8px', width: '42.8571%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.title}</td>
+                          <td style={{ padding: '6px 8px', width: '14.2857%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.assigned_to === 'all' ? '전체' : getPlayerLabel(m.assigned_to)}</td>
+                          <td style={{ padding: '6px 8px', width: '28.5714%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.inserted_at ? new Date(m.inserted_at).toLocaleString() : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {filteredMissions.length === 0 && (
+              <div style={{ padding: 10, color: '#666' }}>현재 등록된 미션이 없습니다.</div>
+            )}
           </div>
 
           {selectedMissionId === null ? (
@@ -1428,19 +1551,17 @@ function App() {
                           <ul style={{ margin: '4px 0 0', paddingLeft: 16 }}>
                             {m.attachments.map((file, idx) => (
                               <li key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <a
-                                  href={file.url || '#'}
-                                  download={file.name}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  onClick={async e => {
-                                    e.preventDefault();
+                                <button
+                                  type="button"
+                                  style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#f7f7f7', border: '1px solid #ccc', borderRadius: 6, cursor: 'pointer' }}
+                                  onClick={async () => {
                                     await openAttachment(file);
                                   }}
                                 >
                                   {file.name}
-                                </a>
+                                </button>
                                 <button
+                                  type="button"
                                   style={{ fontSize: '0.8rem', padding: '2px 6px' }}
                                   onClick={() => handleDeleteAttachment(m.id, file.path)}
                                 >
@@ -1452,7 +1573,7 @@ function App() {
                         </div>
                       )}
                       <p style={{ color: '#666', margin: 0 }}>
-                        ID: #{m.id} / 작성: {m.created_by} / 할당: {m.assigned_to === '미정' ? '미정' : (m.assigned_name || getPlayerLabel(m.assigned_to))}
+                        ID: #{m.id} / 작성: {m.created_by} / 할당: {m.assigned_to === UNASSIGNED_CODE || m.assigned_to === UNASSIGNED_LABEL ? UNASSIGNED_LABEL : (m.assigned_name || getPlayerLabel(m.assigned_to))}
                       </p>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1464,7 +1585,7 @@ function App() {
                           샷 일관성 도구 실행
                         </button>
                       )}
-                      {m.assigned_to === '미정' ? (
+                      {(m.assigned_to === UNASSIGNED_CODE || m.assigned_to === UNASSIGNED_LABEL) ? (
                         <button
                           style={{ fontSize: '0.8rem', padding: '4px 8px' }}
                           onClick={() => onOpenAssignModal(m)}
@@ -1514,7 +1635,7 @@ function App() {
             <label>할당 대상:&nbsp;</label>
             <select value={assignTo} onChange={e => setAssignTo(e.target.value)}>
               <option value="all">전체 선수</option>
-              <option value="미정">미정</option>
+              <option value={UNASSIGNED_CODE}>{UNASSIGNED_LABEL}</option>
               {players.map(p => (
                 <option key={p.id} value={p.id}>
                   선수 {p.display_name || p.username || p.id}
@@ -1522,27 +1643,31 @@ function App() {
               ))}
             </select>
             <p style={{ margin: '4px 0 0', color: '#666', fontSize: '0.85rem' }}>
-              미정 선택 시 선수에게 미할당 상태로 잠시 보관됩니다.
+              {UNASSIGNED_LABEL} 선택 시 선수에게 미할당 상태로 저장됩니다. 이후 선수 지정 시 원본 {UNASSIGNED_LABEL} 미션은 유지되고 복제하여 할당됩니다.
             </p>
           </div>
           <div style={{ marginBottom: 8 }}>
             <label>첨부 파일 (최대 3개):&nbsp;</label>
             <input
               type="file"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.bmp,.gif"
               multiple
               onChange={e => {
-                if (e.target.files) {
-                  const files = Array.from(e.target.files);
-                  if (files.length > 3) {
+                if (!e.target.files) return;
+                const incoming = Array.from(e.target.files);
+                setMissionFiles(prev => {
+                  const nextFiles = [...prev, ...incoming];
+                  if (nextFiles.length > 3) {
                     alert('파일은 최대 3개까지 첨부할 수 있습니다.');
-                    e.target.value = '';
-                    setMissionFiles(null);
-                  } else {
-                    setMissionFiles(e.target.files);
+                    return prev;
                   }
-                }
+                  return nextFiles;
+                });
               }}
             />
+            <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#555' }}>
+              선택된 파일: {missionFiles.length > 0 ? missionFiles.map(f => f.name).join(', ') : '없음'}
+            </div>
           </div>
           <button onClick={handleAddMission}>미션 등록</button>
         </div>
@@ -1632,6 +1757,18 @@ function App() {
                     </div>
                     <h4 style={{ margin: '0 0 6px 0' }}>{latest.title}</h4>
                     <p style={{ margin: '0 0 8px 0' }}>{latest.description}</p>
+                    {latest.attachments && latest.attachments.length > 0 && (
+                      <div style={{ marginBottom: 8 }}>
+                        <strong>첨부파일:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
+                          {latest.attachments.map((file, idx) => (
+                            <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={() => openAttachment(file)}>
+                              {file.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <p style={{ margin: 0, color: '#555' }}>ID: #{latest.id} / 등록: {latest.inserted_at ? formatTimeDistance(latest.inserted_at) : '-'}</p>
                       <div style={{ display: 'flex', gap: 8 }}>
@@ -1669,6 +1806,18 @@ function App() {
                           </div>
                         </div>
                         <p style={{ margin: '4px 0', color: '#666' }}>{m.description}</p>
+                        {m.attachments && m.attachments.length > 0 && (
+                          <div style={{ marginBottom: 8 }}>
+                            <strong>첨부파일:</strong>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
+                              {m.attachments.map((file, idx) => (
+                                <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={() => openAttachment(file)}>
+                                  {file.name}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         {m.subcategory === 'shot_consistency' && (
                           <button onClick={openShotConsistencyTool} style={{ fontSize: '0.8rem', padding: '4px 8px', marginTop: 4 }}>
                             샷 일관성 도구 실행

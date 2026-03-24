@@ -2,17 +2,22 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
   <title>산점도 아이언 일관성 마스터</title>
   <style>
     * {box-sizing:border-box;}
     body {font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#38944a; margin:0; padding:1rem; color:#3ba59e; font-size:13px;}
     .container {width:min(100%, 1160px); margin:0 auto; background:#fff; border-radius:10px; box-shadow:0 5px 22px rgba(0,0,0,0.08); padding:1.2rem; overflow:hidden;}
+    .container, .top-toolbar, .toolbar-block, .toolbar-box {min-width:0;}
     h1,h2 {color:#0b3c68; margin:0 0 .6rem;}
     input, select, button {font-size: 1rem; margin: .25rem 0; padding:.55rem .8rem; border-radius:6px; border:1px solid #c7d3df;}
     button {cursor:pointer;}
     table {width:100%; border-collapse:collapse; margin-top:1rem;}
-    th, td {border:1px solid #ddd; padding:.45rem; text-align:center;}
+    .table-wrapper {width:100%; overflow-x:auto;}
+    th, td {border:1px solid #ddd; padding:.45rem; text-align:center; white-space:nowrap;}
     .result {margin-top:1rem; background:#fff7d6; border-left:4px solid #f1c40f; padding:.8rem;}
+    #vMissionFrameContainer {width:100%; height:calc(100vh - 140px); min-height:480px; max-height:100vh;}
+    #vMissionIframe {width:100%; height:calc(100% - 40px); min-height:420px; min-width:320px; border:none;}
     #charts {display:flex; flex-wrap:wrap; gap:1rem; margin-top:1rem;}
     .chart-box {flex:1 1 35%; min-width:260px; background:#ffffff; padding:.8rem; border:1px solid #eee; border-radius:8px;}
     .input-unit-outer {margin-right:0.6rem; display:inline-flex; align-items:center; border:1px solid #ccc; border-radius:5px; padding:2px 5px; background:#fff;}
@@ -24,33 +29,64 @@
     .shot-row .row-status {margin-left:0.5rem; color:#548a50; font-size:.82rem; font-weight:600;}
 
     .btn-clean, .btn-outline, #unitMBtn, #unitYdBtn {font-size:0.72rem; width:110px; min-width:110px; height:34px; padding:.25rem .4rem; border-radius:8px; display:inline-flex; align-items:center; justify-content:center;}
+    .icon-btn {width:38px; min-width:38px; height:38px; padding:0; font-size:1.2rem; border-radius:50%;}
+    .icon-btn span {display:none;}
     #shotInputRows {max-height:270px; overflow-y:auto; border:1px solid #ccc; border-radius:8px; padding:0.35rem; background:#fafafa;}
-    #shotInputRows .shot-row {margin-bottom:0.4rem;}
+    #shotInputRows .shot-row {display:flex; flex-wrap:wrap; align-items:center; gap:0.3rem; margin-bottom:0.4rem;}
+    #shotInputRows .shot-row .input-unit-outer {display:inline-flex; flex-wrap:nowrap; align-items:center; gap:0.25rem; margin-bottom:0.2rem;}
+    #shotInputRows .shot-row .input-unit-outer input {width:70px; min-width:70px;}
+    #shotInputRows .shot-row .delete-btn {margin-left:auto; padding:0.25rem 0.45rem; font-size:0.8rem;}
     .btn-clean {background:#0b3c68; color:#fff; border:1px solid #0b3c68; font-weight:600; transition:all .2s ease;}
     .btn-clean:hover {background:#0a3155; border-color:#0a3155;}
     .btn-outline {background:#fff; color:#0b3c68; border:1px solid #0b3c68;}
     .btn-outline:hover {background:rgba(11,60,104,.1);}
 
-    .top-toolbar {display:flex; flex-wrap:wrap; align-items:center; gap:.8rem; justify-content:space-between;}
-    .toolbar-block {display:flex; flex-wrap:wrap; gap:.5rem; align-items:center;}
+    .top-toolbar {display:flex; flex-wrap:nowrap; align-items:center; gap:.8rem; justify-content:space-between; overflow-x:auto;}
+    .toolbar-block {display:flex; flex-wrap:nowrap; gap:.5rem; align-items:center; min-width:0;}
     .toolbar-box {border:1px solid #d8e3ef; border-radius:8px; background:#fafbfc; padding:.65rem .7rem;}
+    .club-unit-wrapper {display:flex; align-items:center; gap:0.4rem; min-width:0;}
+    #clubSelect {min-width:130px; width:140px;}
+    .unit-group {display:inline-flex; gap:0.25rem;}
 
     @media (max-width: 900px) {
+      html, body {font-size:14px;}
       body {padding:.8rem;}
       .container {padding:.8rem;}
-      .chart-box {flex:1 1 100%;}
+      .chart-box {flex:1 1 100%; min-width:180px;}
       .toolbar-block {flex:1 1 100%; justify-content:flex-start;}
       .toolbar-box {width:100%;}
-      .btn-clean, .btn-outline {flex:1 1 auto; min-width:140px;}
+      #shotInputRows {max-height:260px;}
+      .btn-clean, .btn-outline {flex:1 1 100%; min-width:0;}
+      #clubSelect {width:100%;}
+      .input-unit-outer {width:100%; margin-right:0;}
+      #tableContainer {overflow-x:auto;}
     }
 
     @media (max-width: 600px) {
-      .input-unit-outer {display:flex; flex-direction:column; align-items:flex-start;}
-      .input-unit-outer input {width:100%;}
+      body {padding:.6rem;}
+      .container {padding:.65rem; border-radius:8px;}
+      .input-unit-outer {display:inline-flex; flex-wrap:nowrap; align-items:center; width:auto;}
+      .input-unit-outer input {width:70px;}
       .top-toolbar {flex-direction:column; align-items:flex-start;}
-      .toolbar-block {width:100%;}
-      .toolbar-box {padding:0.5rem;}
-      #shotInputRows .shot-row {display:flex; flex-direction:column; align-items:flex-start; gap:0.4rem;}
+      .toolbar-block {width:100%; justify-content:flex-start;}
+      .toolbar-box {width:100%; padding:0.5rem;}
+      .btn-clean, .btn-outline {width:auto; min-width:38px; justify-content:center;}
+      #shotInputRows .shot-row {display:flex; flex-wrap:wrap; align-items:center; gap:0.3rem; width:100%;}
+      #chartContainer, #charts {display:block;}
+      .chart-box {width:100%; flex:1 1 auto; min-width:100%;}
+      table {font-size:0.85rem;}
+      #virtualMissionPanel {width:100%; max-width:100%; overflow-x:auto;}
+      #vMissionFrameContainer {width:100%; max-width:100%; overflow:hidden;}
+      #vMissionIframe {width:100%; max-width:100%; height:auto; min-height:420px;}
+      #vMissionIframe.responsive-shrink {transform:scale(0.92); transform-origin:0 0; width:108.7%;}
+    }
+
+    @media (max-width: 420px) {
+      body {font-size:12px;}
+      input, select, button {font-size:0.95rem;}
+      #shotCountLabel, #shotCountBadge {font-size:0.85rem;}
+      h1 {font-size:1.15rem;}
+      h2 {font-size:1rem;}
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -83,9 +119,9 @@
       </div>
     </div>
       <div class="top-toolbar" style="margin-top:0.8rem;">
-        <div class="toolbar-block">
-          <label style="font-weight:600;">클럽 선택:</label>
-          <select id="clubSelect" style="min-width:130px; font-size:1.1rem;">
+        <div class="toolbar-block club-unit-wrapper">
+          <label style="font-weight:600; white-space:nowrap;">클럽 선택:</label>
+          <select id="clubSelect" style="font-size:1.1rem;">
             <option value="D">드라이버</option>
             <option value="W">우드</option>
             <option value="U">유틸리티</option>
@@ -99,17 +135,18 @@
             <option value="5">5번</option>
             <option value="4">4번</option>
           </select>
-          <button class="btn-clean" type="button" id="unitMBtn">m</button>
-          <button class="btn-outline" type="button" id="unitYdBtn">yd</button>
+          <div class="unit-group">
+            <button class="btn-clean" type="button" id="unitMBtn">m</button>
+            <button class="btn-outline" type="button" id="unitYdBtn">yd</button>
+          </div>
         </div>
-        <div class="toolbar-box toolbar-block">
-          <button class="btn-clean" id="csvInputBtn" type="button" onclick="document.getElementById('csvInput').click();"><span style="font-size:1.1rem;">📄</span> CSV Upload</button>
+        <div class="toolbar-box toolbar-block" style="overflow-x:auto; white-space:nowrap;">
+          <button class="btn-clean icon-btn" id="csvInputBtn" type="button" onclick="document.getElementById('csvInput').click();" title="CSV 업로드">📄</button>
           <input type="file" id="csvInput" accept=".csv" style="display:none;" />
-          <button class="btn-clean" id="csvDownloadBtn">💾 CSV Download</button>
-          <button class="btn-clean" id="loadSampleBtn">📊 Sample</button>
-          <button class="btn-clean" id="computeBtn">⚡ Run</button>
-          <button class="btn-outline" id="resetAllBtn">🧹 Reset</button>
-          <button class="btn-clean" id="pdfDownloadBtn">📄 PDF</button>
+          <button class="btn-clean icon-btn" id="csvDownloadBtn" title="CSV 다운로드">💾</button>
+          <button class="btn-clean icon-btn" id="loadSampleBtn" title="샘플 불러오기">📊</button>
+          <button class="btn-outline icon-btn" id="resetAllBtn" title="리셋">🧹</button>
+          <button class="btn-clean icon-btn" id="pdfDownloadBtn" title="PDF 다운로드">🧾</button>
         </div>
       </div>
       <div id="metricSelectionPanel" style="display:none; margin-top:0.8rem; border:1px solid #ddd; padding:0.8rem; border-radius:6px; background:#fafafa;">
@@ -155,12 +192,12 @@
       </ul>
       <button id="startVMissionGoBtn" style="margin-right:.5rem; background:#1a73e8; color:#fff; border:none; padding:.5rem .8rem; border-radius:6px; cursor:pointer;">미션 시작 (사이트 연결)</button>
       <button id="closeVMissionBtn" style="background:#d32f2f; color:#fff; border:none; padding:.5rem .8rem; border-radius:6px; cursor:pointer;">미션 닫기</button>
-      <div id="vMissionFrameContainer" style="display:none; margin-top:1rem; border:1px solid #ddd; border-radius:8px; overflow:hidden; height:70vh;">
+      <div id="vMissionFrameContainer" style="display:none; margin-top:1rem; border:1px solid #ddd; border-radius:8px; overflow:hidden; height:calc(100vh - 140px); min-height:480px; max-height:100vh; width:100%;">
         <div style="background:#fff; border-bottom:1px solid #ddd; padding:.5rem; display:flex; justify-content:space-between; align-items:center;">
           <span>가상라운드 미션 진행 중</span>
           <button id="closeVframeBtn" style="background:#aaa; color:#fff; border:none; padding:.3rem .6rem; border-radius:5px; cursor:pointer;">닫기</button>
         </div>
-        <iframe id="vMissionIframe" src="" frameborder="0" style="width:100%; height:calc(100% - 40px);"></iframe>
+        <iframe id="vMissionIframe" src="" frameborder="0" style="width:100%; height:calc(100% - 40px); min-height:420px; min-width:320px;"></iframe>
       </div>
     </div>
 
@@ -640,6 +677,21 @@ safeAddEventListener('startVMissionGoBtn', 'click', () => {
   if (frameContainer && iframe) {
     iframe.src = 'https://soonyongchun-dotcom.github.io/putting-training/index1.html';
     frameContainer.style.display = 'block';
+    if (window.innerWidth <= 600) {
+      iframe.classList.add('responsive-shrink');
+    } else {
+      iframe.classList.remove('responsive-shrink');
+    }
+  }
+});
+
+window.addEventListener('resize', () => {
+  const iframe = document.getElementById('vMissionIframe');
+  if (!iframe) return;
+  if (window.innerWidth <= 600) {
+    iframe.classList.add('responsive-shrink');
+  } else {
+    iframe.classList.remove('responsive-shrink');
   }
 });
 
@@ -943,10 +995,18 @@ function createShotRow(index, averages = {}, shotValues = null) {
 
   allMetrics.forEach(metric => {
     const lower = metric.toLowerCase();
-    let value = shotValues && shotValues[metric] !== undefined ? shotValues[metric] : getMetricDefault(metric, club, unit);
-    if (!shotValues && metric === 'SideTotal' && Number.isFinite(averages[metric])) {
-      value = Number(averages[metric].toFixed(1));
+
+    let value = getMetricDefault(metric, club, unit);
+
+    if (shotValues && shotValues[metric] !== undefined && shotValues[metric] !== null && shotValues[metric] !== '') {
+      value = shotValues[metric];
+    } else if (!shotValues && averages && Number.isFinite(averages[metric])) {
+      value = Number(averages[metric]);
+      if (metric === 'SideTotal' || metric === 'Carry' || metric === 'Height') {
+        value = Number(value.toFixed(1));
+      }
     }
+
     const display = selectedMetrics.includes(metric) ? 'inline-flex' : 'none';
     const unitLabel = (metric === 'Carry' || metric === 'SideTotal' || metric === 'Height') ? unit : (metricUnits[metric] || '');
     const step = (metric === 'BackSpin' || metric === 'SideSpin') ? '50' : ((metric === 'SmashFactor' || metric === 'SideTotal') ? '0.1' : '1');
@@ -1038,6 +1098,21 @@ function getMetricAverages(metrics = []) {
     }
   });
   return averages;
+}
+
+function getLastShotValues() {
+  const firstRow = document.querySelector('#shotInputRows .shot-row');
+  if (!firstRow) return null;
+
+  const shot = {};
+  allMetrics.forEach(metric => {
+    const input = firstRow.querySelector(`.${metric.toLowerCase()}`);
+    if (input && input.value !== '') {
+      const num = Number(input.value);
+      shot[metric] = Number.isFinite(num) ? num : input.value;
+    }
+  });
+  return shot;
 }
 
 function saveShotBackup() {
@@ -1138,7 +1213,9 @@ safeAddEventListener('confirmMetricsBtn', 'click', () => {
   if (!wrapper || !container) return;
   wrapper.style.display = 'block';
   container.innerHTML = '';
-  const averages = getMetricAverages(['SideTotal']);
+
+  // 첫 시작 샷은 이전 입력 없으면 평균값 기반으로 채움
+  const averages = getMetricAverages(selectedMetrics);
   container.appendChild(createShotRow(1, averages));
   updateShotCountLabel();
   const addShotBtn = document.getElementById('addShotBtn');
@@ -1159,8 +1236,9 @@ safeAddEventListener('addShotBtn', 'click', () => {
   markAllRowsSaved();
   const nextIndex = container.querySelectorAll('.shot-row').length + 1;
   if (nextIndex > 100) return;
-  const averages = getMetricAverages(['SideTotal']);
-  const newRow = createShotRow(nextIndex, averages);
+
+  const previousShotValues = getLastShotValues();
+  const newRow = createShotRow(nextIndex, {}, previousShotValues);
   container.insertBefore(newRow, container.firstChild);
   updateShotCountLabel();
   runShotAnalysis();
@@ -1220,15 +1298,6 @@ document.getElementById('loadSampleBtn').addEventListener('click', () => {
   ];
   window.currentShots = sample;
   onAnalyze(sample, document.getElementById('clubSelect').value);
-});
-
-document.getElementById('computeBtn').addEventListener('click', () => {
-  const shots = window.currentShots;
-  if (!shots || shots.length !== 10) {
-    alert('샘플을 로드하거나 CSV를 선택해 주세요 (10개 행)');
-    return;
-  }
-  onAnalyze(shots, document.getElementById('clubSelect').value);
 });
 </script>
 </body>
