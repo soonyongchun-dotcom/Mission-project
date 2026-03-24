@@ -367,8 +367,8 @@ function describeShots(shots, club, selectedMetrics) {
     const stat = summary[metric] || summary[metric.toLowerCase()] || { mean: 0, std: 0, range: 0 };
     const mean = stat.mean;
     const std = stat.std;
-    const ratio = Math.abs(mean) < 1e-9 ? (std < 0.05 ? 0 : Number.POSITIVE_INFINITY) : std / Math.abs(mean);
-    const pass = ratio < 0.05;
+    const ratio = Math.abs(mean) < 1e-9 ? (std < 0.1 ? 0 : Number.POSITIVE_INFINITY) : std / Math.abs(mean);
+    const pass = ratio <= 0.1;
 
     const ratioDisplay = ratio === Number.POSITIVE_INFINITY ? '∞' : (ratio * 100).toFixed(2) + '%';
 
@@ -388,7 +388,7 @@ function describeShots(shots, club, selectedMetrics) {
   const avgRatio = ratioValues.length ? ratioValues.reduce((a,b) => a + b, 0) / ratioValues.length : 0;
   const avgStdRatioDisplay = Number.isFinite(avgRatio) ? (avgRatio * 100).toFixed(2) + '%' : 'N/A';
 
-  const finalPass = Number.isFinite(avgRatio) ? avgRatio < 0.05 : false;
+  const finalPass = Number.isFinite(avgRatio) ? avgRatio <= 0.1 : false;
 
   const syFormat = {
     club,
@@ -1009,7 +1009,7 @@ function createShotRow(index, averages = {}, shotValues = null) {
 
     const display = selectedMetrics.includes(metric) ? 'inline-flex' : 'none';
     const unitLabel = (metric === 'Carry' || metric === 'SideTotal' || metric === 'Height') ? unit : (metricUnits[metric] || '');
-    const step = (metric === 'BackSpin' || metric === 'SideSpin') ? '50' : ((metric === 'SmashFactor' || metric === 'SideTotal') ? '0.1' : '1');
+    const step = (metric === 'BackSpin' || metric === 'SideSpin') ? '50' : ((metric === 'SmashFactor') ? '0.1' : (metric === 'SideTotal' ? '1' : '1'));
 
     html += `
       <span class='input-unit-outer metric-field metric-${lower}' style='display:${display};'>${metricLabels[metric] || metric}
