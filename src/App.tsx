@@ -96,8 +96,11 @@ function App() {
   const [shotConsistencyUrl, setShotConsistencyUrl] = useState('');
   const [shotPanelMode, setShotPanelMode] = useState<'fullscreen' | 'window'>('window');
   const [playerReply, setPlayerReply] = useState<Record<number, string>>({});
+  const [missionReply, setMissionReply] = useState<Record<number, string>>({});
   const [showVerificationPanel, setShowVerificationPanel] = useState(false);
   const [selectedMissionId, setSelectedMissionId] = useState<number | null>(null);
+  const [selectedPlayerMissionId, setSelectedPlayerMissionId] = useState<number | null>(null);
+  const [playerMissionChat, setPlayerMissionChat] = useState<Record<number, string>>({});
   const [verifiedPlayers, setVerifiedPlayers] = useState<Record<string, boolean>>({});
   const [viewedMissionIds, setViewedMissionIds] = useState<number[]>([]);
   const [showMineOnly, setShowMineOnly] = useState(false);
@@ -124,6 +127,13 @@ function App() {
   }, [filteredMissions]);
 
   const visibleMissions = selectedMissionId !== null ? filteredMissions.filter(m => m.id === selectedMissionId) : [];
+
+  const myMissionLogs = missionLogs.filter(log => log.player_id === currentPlayer);
+  const missionLogsByMission = myMissionLogs.reduce<Record<number, MissionLog[]>>((acc, log) => {
+    if (!acc[log.mission_id]) acc[log.mission_id] = [];
+    acc[log.mission_id].push(log);
+    return acc;
+  }, {});
 
   const loadMissions = async () => {
     const { data, error } = await supabase
@@ -676,6 +686,76 @@ function App() {
     alert('코치에게 의견을 전달했습니다.');
   };
 
+  const handlePlayerMessage = async (missionId: number) => {
+    if (!currentPlayer) {
+      alert('선수로 로그인된 상태여야 합니다.');
+      return;
+    }
+
+    const message = playerMissionChat[missionId]?.trim();
+    if (!message) {
+      alert('전송할 메시지를 입력하세요.');
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('mission_logs')
+      .insert([
+        {
+          mission_id: missionId,
+          player_id: currentPlayer,
+          status: 'pending',
+          note: message,
+          coach_feedback: null
+        }
+      ])
+      .select();
+
+    if (error || !data) {
+      alert('메시지 전송 실패: ' + error?.message);
+      return;
+    }
+
+    setPlayerMissionChat(prev => ({ ...prev, [missionId]: '' }));
+    loadMissionLogs();
+    alert('코치에게 메시지를 전송했습니다.');
+  };
+
+  const handleMissionChatSend = async (missionId: number) => {
+    if (!currentPlayer) {
+      alert('선수로 로그인된 상태여야 합니다.');
+      return;
+    }
+
+    const message = missionReply[missionId]?.trim();
+    if (!message) {
+      alert('전송할 메시지를 입력하세요.');
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('mission_logs')
+      .insert([
+        {
+          mission_id: missionId,
+          player_id: currentPlayer,
+          status: 'pending',
+          note: message,
+          coach_feedback: null
+        }
+      ])
+      .select();
+
+    if (error || !data) {
+      alert('코멘트 전송 실패: ' + error?.message);
+      return;
+    }
+
+    setMissionReply(prev => ({ ...prev, [missionId]: '' }));
+    loadMissionLogs();
+    alert('미션에 대한 코멘트가 전송되었습니다.');
+  };
+
   const handleVerifyPlayer = async (playerId: string) => {
     const newValue = !verifiedPlayers[playerId];
 
@@ -835,7 +915,7 @@ function App() {
     const confirmed = window.confirm('정말 이 선수를 삭제하시겠습니까?');
     if (!confirmed) return;
 
-    // 선수 관련 로그와 피드백도 함께 삭제
+    // 선수 관련 미션 로그 삭제
     const { error: logError } = await supabase
       .from('mission_logs')
       .delete()
@@ -844,6 +924,18 @@ function App() {
     if (logError) {
       console.error('선수 미션 로그 삭제 실패:', logError);
       alert('선수 미션 로그 삭제 중 오류가 발생했습니다. 콘솔을 확인하세요.');
+      return;
+    }
+
+    // 선수 관련 미션 데이터 삭제 (선택적, 요청에 따라 포함)
+    const { error: missionError } = await supabase
+      .from('missions')
+      .delete()
+      .eq('assigned_to', playerId);
+
+    if (missionError) {
+      console.error('할당된 미션 삭제 실패:', missionError);
+      alert('할당된 미션 삭제 중 오류가 발생했습니다. 콘솔을 확인하세요.');
       return;
     }
 
@@ -1717,8 +1809,11 @@ function App() {
           </div>
           {(() => {
             let available = missions
-              .filter(m => m.category === category && m.subcategory === subcategory)
-              .filter(m => !showMineOnly || m.assigned_to === 'all' || m.assigned_to === currentPlayer);
+              .filter(m => m.assigned_to === 'all' || m.assigned_to === currentPlayer);
+
+            if (category && subcategory) {
+              available = available.filter(m => m.category === category && m.subcategory === subcategory);
+            }
 
             const missionStatusMap = new Map<number, 'pending' | 'completed'>(missionLogs.map(log => [log.mission_id, log.status]));
             if (missionFilter === 'pending') {
@@ -1728,40 +1823,90 @@ function App() {
             }
 
             available = available.sort((a, b) => new Date(b.inserted_at || '').getTime() - new Date(a.inserted_at || '').getTime());
-            const assignedAll = available.filter(m => m.assigned_to === 'all' || m.assigned_to === currentPlayer);
+            const assignedAll = available;
             const assignedLatest = assignedAll[0];
             const assignedCount = assignedAll.length;
             const latest = missionFilter === 'latest' ? assignedLatest : available[0];
-            const rest = available.filter(m => latest ? m.id !== latest.id : true);
+            const missionsForList = assignedAll.length > 0 ? assignedAll : available;
+            const selectedMission = missionsForList.find(m => m.id === selectedPlayerMissionId);
 
             return (
               <>
                 <div className="content-section" style={{ marginBottom: 12 }}>
                   <strong>내 할당 미션</strong>
-                  <div style={{ marginTop: 8, color: '#444' }}>
-                    전체 할당 미션: {assignedCount}개
+                  <div style={{ marginTop: 8, color: '#444' }}>전체 할당 미션: {assignedCount}개</div>
+                  <div style={{ maxHeight: 190, overflowY: 'auto', marginTop: 8, border: '1px solid #ddd', borderRadius: 6, padding: 8, background: '#fff' }}>
+                    {missionsForList.length === 0 ? (
+                      <div style={{ color: '#888' }}>할당된 미션이 없습니다.</div>
+                    ) : (
+                      <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                        {missionsForList.map(m => (
+                          <li
+                            key={m.id}
+                            onClick={() => setSelectedPlayerMissionId(m.id)}
+                            style={{
+                              marginBottom: 6,
+                              padding: '8px',
+                              background: selectedPlayerMissionId === m.id ? '#eef6ff' : '#fafafa',
+                              borderRadius: 6,
+                              cursor: 'pointer',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <span style={{ fontWeight: selectedPlayerMissionId === m.id ? 700 : 500, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {m.title}
+                            </span>
+                            <button
+                              style={{ fontSize: '0.75rem', padding: '3px 8px' }}
+                              onClick={e => {
+                                e.stopPropagation();
+                                setSelectedPlayerMissionId(m.id);
+                                markMissionViewed(m.id);
+                              }}
+                            >
+                              보기
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <strong>최신 미션</strong>
                   {assignedLatest ? (
-                    <div style={{ marginTop: 8, color: '#1a73e8', fontWeight: 600 }}>
-                      최신 할당 미션: {assignedLatest.title} ({assignedLatest.category === 'technical' ? '테크니컬' : '실전'})
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, padding: '8px', border: '1px solid #dedede', borderRadius: 6, background: '#fff' }}>
+                      <span style={{ color: '#333' }}>
+                        {assignedLatest.title} · {assignedLatest.category === 'technical' ? '테크니컬' : '실전'} · {assignedLatest.inserted_at ? formatTimeDistance(assignedLatest.inserted_at) : '-'}
+                      </span>
+                      <button
+                        style={{ fontSize: '0.8rem', padding: '4px 10px' }}
+                        onClick={() => {
+                          setSelectedPlayerMissionId(assignedLatest.id);
+                          markMissionViewed(assignedLatest.id);
+                        }}
+                      >
+                        확인
+                      </button>
                     </div>
                   ) : (
                     <div style={{ marginTop: 8, color: '#888' }}>새로 할당된 미션이 없습니다.</div>
                   )}
                 </div>
-                {latest ? (
-                  <div className="content-block-alt" style={{ marginBottom: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                      <strong>최신 미션</strong>
-                      <span style={{ fontSize: '0.85rem', color: '#666' }}>{viewedMissionIds.includes(latest.id) ? '열람 완료' : 'NEW'}</span>
-                    </div>
-                    <h4 style={{ margin: '0 0 6px 0' }}>{latest.title}</h4>
-                    <p style={{ margin: '0 0 8px 0' }}>{latest.description}</p>
-                    {latest.attachments && latest.attachments.length > 0 && (
+
+                {selectedMission ? (
+                  <div style={{ border: '1px solid #d0e4ff', borderRadius: 8, padding: 12, background: '#f9fcff', marginBottom: 16 }}>
+                    <h4 style={{ margin: '0 0 8px 0' }}>선택된 미션 상세보기</h4>
+                    <h5 style={{ margin: '0 0 6px 0' }}>{selectedMission.title}</h5>
+                    <p style={{ margin: '0 0 10px 0', color: '#333' }}>{selectedMission.description}</p>
+                    {selectedMission.attachments && selectedMission.attachments.length > 0 && (
                       <div style={{ marginBottom: 8 }}>
                         <strong>첨부파일:</strong>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
-                          {latest.attachments.map((file, idx) => (
+                          {selectedMission.attachments.map((file, idx) => (
                             <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={() => openAttachment(file)}>
                               {file.name}
                             </button>
@@ -1769,63 +1914,50 @@ function App() {
                         </div>
                       </div>
                     )}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <p style={{ margin: 0, color: '#555' }}>ID: #{latest.id} / 등록: {latest.inserted_at ? formatTimeDistance(latest.inserted_at) : '-'}</p>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        {latest.subcategory === 'shot_consistency' && (
-                          <button onClick={openShotConsistencyTool} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
-                            샷 일관성 도구 실행
-                          </button>
-                        )}
-                        <button onClick={() => markMissionViewed(latest.id)} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
-                          확인
-                        </button>
+                    <div style={{ fontSize: '0.9rem', color: '#555', marginBottom: 8 }}>
+                      ID: #{selectedMission.id} · 등록: {selectedMission.inserted_at ? formatTimeDistance(selectedMission.inserted_at) : '-'}
+                    </div>
+                    <div style={{ marginTop: 8, padding: 10, border: '1px solid #ccc', borderRadius: 6, background: '#fff' }}>
+                      <strong>코치 피드백</strong>
+                      <div style={{ marginTop: 6 }}>
+                        {(() => {
+                          const missionLogsForSelected = missionLogs.filter(l => l.mission_id === selectedMission.id && l.player_id === currentPlayer);
+                          if (missionLogsForSelected.length === 0) {
+                            return <p style={{ margin: 0, color: '#888' }}>코치 피드백이 아직 등록되지 않았습니다. 아래 '나의 미션 로그'에서 해당 미션별 기록을 확인하세요.</p>;
+                          }
+                          return (
+                            <>
+                              {missionLogsForSelected.map(log => (
+                                <div key={log.id} style={{ marginBottom: 8, padding: 8, background: '#f5f9ff', borderRadius: 6 }}>
+                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', fontWeight: 600, color: '#1a237e' }}>상태: {log.status}</p>
+                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', color: '#004d40' }}><strong>선수 코멘트:</strong> {log.note || '없음'}</p>
+                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', color: '#b71c1c' }}><strong>코치 코멘트:</strong> {log.coach_feedback || '미등록'}</p>
+                                </div>
+                              ))}
+                            </>
+                          );
+                        })()}
                       </div>
+                    </div>
+                    <div style={{ marginTop: 8, padding: 10, border: '1px solid #ccc', borderRadius: 6, background: '#fff' }}>
+                      <strong>미션에 코멘트 보내기</strong>
+                      <textarea
+                        rows={3}
+                        style={{ width: '100%', marginTop: 6, padding: 8, borderRadius: 6, border: '1px solid #ddd' }}
+                        value={missionReply[selectedMission.id] || ''}
+                        onChange={e => setMissionReply(prev => ({ ...prev, [selectedMission.id]: e.target.value }))}
+                        placeholder="선택된 미션에 대한 의견을 입력하세요"
+                      />
+                      <button
+                        style={{ marginTop: 8, padding: '6px 10px', fontSize: '0.9rem' }}
+                        onClick={() => handleMissionChatSend(selectedMission.id)}
+                      >
+                        전송
+                      </button>
                     </div>
                   </div>
                 ) : (
-                  <p>할당된 미션이 없습니다.</p>
-                )}
-
-                {rest.length > 0 && (
-                  <div className="mission-list-container">
-                    {rest.map(m => (
-                      <div key={m.id} style={{ borderBottom: '1px solid #e9ecef', padding: '8px 0', opacity: viewedMissionIds.includes(m.id) ? 0.6 : 1 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <strong>{m.title}</strong>
-                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                            <span style={{ fontSize: '0.8rem', color: '#999' }}>{formatTimeDistance(m.inserted_at)}</span>
-                            <span style={{ fontSize: '0.75rem', color: viewedMissionIds.includes(m.id) ? '#888' : '#d9534f' }}>
-                              {viewedMissionIds.includes(m.id) ? '열람 완료' : 'NEW'}
-                            </span>
-                            {!viewedMissionIds.includes(m.id) && (
-                              <button onClick={() => markMissionViewed(m.id)} style={{ fontSize: '0.7rem', padding: '2px 6px' }}>
-                                확인
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <p style={{ margin: '4px 0', color: '#666' }}>{m.description}</p>
-                        {m.attachments && m.attachments.length > 0 && (
-                          <div style={{ marginBottom: 8 }}>
-                            <strong>첨부파일:</strong>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
-                              {m.attachments.map((file, idx) => (
-                                <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={() => openAttachment(file)}>
-                                  {file.name}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {m.subcategory === 'shot_consistency' && (
-                          <button onClick={openShotConsistencyTool} style={{ fontSize: '0.8rem', padding: '4px 8px', marginTop: 4 }}>
-                            샷 일관성 도구 실행
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                  <div style={{ marginBottom: 16, color: '#666' }}>미션을 선택하면 상세 내용을 표시합니다.</div>
                 )}
               </>
             );
@@ -1833,28 +1965,43 @@ function App() {
 
           <div style={{ marginTop: 24 }}>
             <h3>나의 미션 로그</h3>
-            {missionLogs
-              .filter(log => log.player_id === currentPlayer)
-              .map(log => (
-                <div key={log.id} style={{ border: '1px dashed #999', marginBottom: 8, padding: 8 }}>
-                  <div>미션 ID: {log.mission_id}</div>
-                  <div>상태: {log.status}</div>
-                  <div>작성일: {new Date(log.created_at).toLocaleString()}</div>
-                  <div>선수코멘트: {log.note}</div>
-                  <div>코치: {log.coach_feedback || '미등록'}</div>
-                  <div style={{ marginTop: 8 }}>
-                    <textarea
-                      value={playerReply[log.id] || ''}
-                      onChange={e => setPlayerReply(prev => ({ ...prev, [log.id]: e.target.value }))}
-                      placeholder="코치에게 추가 의견 보내기"
-                      style={{ width: '100%', minHeight: 48, marginBottom: 6 }}
-                    />
-                    <button onClick={() => handlePlayerReply(log.id, log.mission_id)}>
-                      코멘트 답장 보내기
-                    </button>
-                  </div>
-                </div>
-              ))}
+            {Object.keys(missionLogsByMission).length === 0 ? (
+              <p style={{ color: '#666' }}>현재 등록된 미션 로그가 없습니다.</p>
+            ) : (
+              <div style={{ maxHeight: 300, overflowY: 'auto', paddingRight: 6 }}>
+                {Object.entries(missionLogsByMission as Record<string, MissionLog[]>)
+                  .sort((a, b) => Number(b[0]) - Number(a[0]))
+                  .map(([missionIdStr, logs]) => {
+                    const missionId = Number(missionIdStr);
+                    const missionInfo = missions.find(m => m.id === missionId);
+                    return (
+                      <div key={missionId} style={{ border: '1px solid #d5d5d5', marginBottom: 10, borderRadius: 8, padding: 10, background: '#f9f9f9' }}>
+                        <h4 style={{ margin: '0 0 6px 0' }}>
+                          미션 #{missionId} {missionInfo ? `- ${missionInfo.title}` : ''}
+                        </h4>
+                        {logs
+                          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+                          .map(log => (
+                            <div key={log.id} style={{ border: '1px dashed #999', marginBottom: 8, padding: 8, background: '#fff', borderRadius: 6 }}>
+                              <div style={{ fontSize: '0.85rem', color: '#666' }}>작성일: {new Date(log.created_at).toLocaleString()}</div>
+                              <div style={{ margin: '2px 0', fontSize: '0.9rem', color: '#004d40' }}><strong>선수코멘트:</strong> {log.note || '없음'}</div>
+                              <div style={{ margin: '2px 0', fontSize: '0.9rem', color: '#b71c1c' }}><strong>코치:</strong> {log.coach_feedback || '미등록'}</div>
+                            </div>
+                          ))}
+                        <div style={{ marginTop: 8 }}>
+                          <textarea
+                            value={missionReply[missionId] || ''}
+                            onChange={e => setMissionReply(prev => ({ ...prev, [missionId]: e.target.value }))}
+                            placeholder="이 미션에 대한 코치에게 보낼 메시지"
+                            style={{ width: '100%', minHeight: 48, marginBottom: 6 }}
+                          />
+                          <button onClick={() => handleMissionChatSend(missionId)}>미션 코멘트 전송</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         </div>
       )}
