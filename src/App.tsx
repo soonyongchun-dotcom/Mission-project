@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabaseClient';
 
 type Role = 'coach' | 'player' | null;
@@ -84,7 +84,7 @@ function App() {
   const UNASSIGNED_CODE = 'unassigned';
   const UNASSIGNED_LABEL = '미정';
   const [missionFiles, setMissionFiles] = useState<File[]>([]);
-  const [storageBucket, setStorageBucket] = useState('mission-files');
+  const [storageBucket, setStorageBucket] = useState('attachments');
   const [missionLogs, setMissionLogs] = useState<MissionLog[]>([]);
   const [assignModalMission, setAssignModalMission] = useState<Mission | null>(null);
   const [assignTarget, setAssignTarget] = useState('');
@@ -108,6 +108,7 @@ function App() {
   const [showAssignedOnly, setShowAssignedOnly] = useState(false);
   const [showSubcategoryDropdown, setShowSubcategoryDropdown] = useState(false);
   const [playerPasswordInputs, setPlayerPasswordInputs] = useState<Record<string, string>>({});
+  const missingBucketsRef = useRef<Set<string>>(new Set());
 
   const filteredMissions = useMemo(() => {
     if (!category || !subcategory) return [];
@@ -191,9 +192,13 @@ function App() {
         console.warn('버킷 목록 조회 실패 (읽기 권한 문제 가능):', listError);
       }
 
-      if (buckets?.some(b => b.name === 'mission-files')) {
-        setStorageBucket('mission-files');
-        return;
+      if (buckets && buckets.length > 0) {
+        const existing = new Set(buckets.map(b => b.name));
+        ['attachments', 'mission-files'].forEach(name => {
+          if (!existing.has(name)) {
+            missingBucketsRef.current.add(name);
+          }
+        });
       }
 
       if (buckets?.some(b => b.name === 'attachments')) {
@@ -201,88 +206,196 @@ function App() {
         return;
       }
 
-      console.warn('기존 버킷이 없거나 권한 없음. mission-files를 사용하여 업로드 시도합니다.');
-      setStorageBucket('mission-files');
+      if (buckets?.some(b => b.name === 'mission-files')) {
+        setStorageBucket('mission-files');
+        return;
+      }
+
+      console.warn('기존 버킷이 없거나 권한 없음. attachments를 우선 사용합니다.');
+      setStorageBucket('attachments');
       return;
     } catch (bucketError) {
-      console.warn('버킷 목록 조회 중 예외(권한 제한 가능). mission-files 우선 사용:', bucketError);
-      setStorageBucket('mission-files');
+      console.warn('버킷 목록 조회 중 예외(권한 제한 가능). attachments 우선 사용:', bucketError);
+      setStorageBucket('attachments');
       return;
     }
-  };
-
-  const getAttachmentUrl = async (path: string, bucketHint?: string): Promise<string> => {
-    if (!path) return '';
-    if (path.startsWith('http://') || path.startsWith('https://')) return path;
-
-    const rawPath = path.trim();
-    const cleanedPath = rawPath.replace(/^\/+/, '');
-
-    // path에 bucket 이름이 포함된 케이스 지원: mission-files/file.jpg 또는 attachments/file.jpg
-    let directBucket: string | undefined;
-    let objectPath = cleanedPath;
-    const parts = cleanedPath.split('/');
-    if (parts.length > 1 && ['mission-files', 'attachments'].includes(parts[0])) {
-      directBucket = parts[0];
-      objectPath = parts.slice(1).join('/');
-    }
-
-    const bucketsToTry = new Set<string>();
-    if (directBucket) bucketsToTry.add(directBucket);
-    if (bucketHint) bucketsToTry.add(bucketHint);
-    if (storageBucket) bucketsToTry.add(storageBucket);
-    ['mission-files', 'attachments'].forEach(b => bucketsToTry.add(b));
-
-    for (const bucket of bucketsToTry) {
-      try {
-        const signed = await supabase.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
-        if (!signed.error && signed.data?.signedUrl) {
-          console.debug('getAttachmentUrl (signedUrl) 성공', { bucket, path: objectPath });
-          return signed.data.signedUrl;
-        }
-
-        if (signed.error) {
-          console.debug('getAttachmentUrl: createSignedUrl 실패', { bucket, path: objectPath, message: signed.error.message });
-        }
-
-        const publicResult = supabase.storage.from(bucket).getPublicUrl(objectPath);
-        if (publicResult.data?.publicUrl) {
-          console.debug('getAttachmentUrl (publicUrl) 성공', { bucket, path: objectPath, url: publicResult.data.publicUrl });
-          return publicResult.data.publicUrl;
-        }
-      } catch (error) {
-        console.warn('getAttachmentUrl 오류:', bucket, objectPath, error);
-      }
-    }
-
-    console.warn('getAttachmentUrl: 모든 버킷에서 실패', { path: objectPath, hintedBucket: bucketHint, storageBucket });
-    return '';
   };
 
   const openAttachment = async (file: {name:string;path:string;url?:string;bucket?:string}) => {
-    const urlCandidates: string[] = [];
+    const isSignedUrlWithoutToken = (url: string) => {
+      return /\/storage\/v1\/object\/sign\//.test(url) && !/[?&]token=/.test(url);
+    };
+
+    const parseBucketAndPathFromUrl = (url: string): { bucket: string; path: string } | null => {
+      const signMatch = url.match(/storage\/v1\/object\/sign\/([^/]+)\/([^?]+)/);
+      if (signMatch) {
+        return { bucket: signMatch[1], path: decodeURIComponent(signMatch[2]) };
+      }
+
+      const publicMatch = url.match(/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+      if (publicMatch) {
+        return { bucket: publicMatch[1], path: decodeURIComponent(publicMatch[2]) };
+      }
+
+      return null;
+    };
+
+    const buildBucketCandidates = () => {
+      const candidates = [file.bucket, storageBucket];
+      return Array.from(new Set(candidates.filter(Boolean) as string[])).filter(
+        b => !missingBucketsRef.current.has(b)
+      );
+    };
+
+    const openByBlobDownload = async (bucket: string, objectPath: string) => {
+      const trimmedPath = objectPath.replace(/^\/+/, '');
+      const { data, error } = await supabase.storage.from(bucket).download(trimmedPath);
+      if (error || !data) {
+        const msg = error?.message || '';
+        if (/bucket not found/i.test(msg)) {
+          missingBucketsRef.current.add(bucket);
+        }
+        return false;
+      }
+
+      const blobUrl = URL.createObjectURL(data);
+      const opened = window.open(blobUrl, '_blank');
+      if (!opened) {
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.target = '_blank';
+        a.rel = 'noreferrer';
+        a.download = file.name || '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      return true;
+    };
+
+    const findReplacementObjectPath = async (bucket: string, originalFileName: string, originalPath?: string) => {
+      const normalizedFileName = (originalFileName || '').trim().toLowerCase();
+      const originalBaseName = (originalPath || '').split('/').pop()?.trim().toLowerCase() || '';
+
+      const tokenMatch = originalBaseName.match(/^mission_\d+_[a-z0-9]+_(.+)$/i);
+      const normalizedSuffixToken = tokenMatch?.[1] || '';
+
+      const { data, error } = await supabase.storage.from(bucket).list('', { limit: 1000 });
+      if (error || !data || data.length === 0) {
+        return '';
+      }
+
+      const scored = data
+        .filter(item => !!item.name)
+        .map(item => {
+          const name = item.name.toLowerCase();
+          let score = 0;
+          if (normalizedFileName && name.endsWith(`_${normalizedFileName}`)) score += 5;
+          if (normalizedFileName && name.includes(normalizedFileName)) score += 3;
+          if (normalizedSuffixToken && name.endsWith(normalizedSuffixToken)) score += 7;
+          if (originalBaseName && name === originalBaseName) score += 10;
+          return { item, score };
+        })
+        .filter(entry => entry.score > 0);
+
+      if (scored.length === 0) {
+        return '';
+      }
+
+      const candidates = scored.map(entry => entry.item);
+      const sorted = [...candidates].sort((a, b) => {
+        const ta = new Date(a.updated_at || a.created_at || 0).getTime();
+        const tb = new Date(b.updated_at || b.created_at || 0).getTime();
+        return tb - ta;
+      });
+      return sorted[0]?.name || '';
+    };
+
+    const resolveExistingObjectPath = async (bucket: string, requestedPath: string, originalFileName: string) => {
+      const trimmed = (requestedPath || '').replace(/^\/+/, '');
+      const baseName = trimmed.split('/').pop()?.trim() || '';
+      if (!baseName) return '';
+
+      const { data, error } = await supabase.storage.from(bucket).list('', { limit: 1000 });
+      if (error || !data || data.length === 0) {
+        return '';
+      }
+
+      const exact = data.find(item => item.name === trimmed || item.name === baseName);
+      if (exact?.name) return exact.name;
+
+      const matchedByName = await findReplacementObjectPath(bucket, originalFileName || baseName, trimmed);
+      return matchedByName || '';
+    };
+
+    const downloadCandidates: { bucket: string; path: string }[] = [];
 
     if (file.path) {
-      const generated = await getAttachmentUrl(file.path, file.bucket);
-      if (generated) {
-        urlCandidates.push(generated);
+      const normalizedPath = file.path.trim().replace(/^\/+/, '');
+      const parts = normalizedPath.split('/');
+      if (parts.length > 1 && ['mission-files', 'attachments'].includes(parts[0])) {
+        const directBucket = parts[0];
+        const objectPath = parts.slice(1).join('/');
+        downloadCandidates.push({ bucket: directBucket, path: objectPath });
+      }
+
+      buildBucketCandidates().forEach(bucket => {
+        downloadCandidates.push({ bucket, path: normalizedPath });
+      });
+    }
+
+    if (file.url) {
+      const parsed = parseBucketAndPathFromUrl(file.url);
+      if (parsed) {
+        downloadCandidates.push(parsed);
       }
     }
 
-    // URL에서 bucket/path 추출을 시도
-    if (file.url) {
-      const match = file.url.match(/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
-      if (match) {
-        const [, parsedBucket, parsedPath] = match;
-        const generatedFromUrl = await getAttachmentUrl(parsedPath, parsedBucket);
-        if (generatedFromUrl && !urlCandidates.includes(generatedFromUrl)) {
-          urlCandidates.push(generatedFromUrl);
-        }
-      }
+    const dedupedDownloadCandidates = Array.from(
+      new Map(downloadCandidates.map(c => [`${c.bucket}::${c.path}`, c])).values()
+    );
 
-      if (!urlCandidates.includes(file.url)) {
-        urlCandidates.push(file.url);
+    for (const candidate of dedupedDownloadCandidates) {
+      try {
+        const existingPath = await resolveExistingObjectPath(candidate.bucket, candidate.path, file.name || '');
+        if (!existingPath) {
+          continue;
+        }
+
+        const ok = await openByBlobDownload(candidate.bucket, existingPath);
+        if (ok) {
+          return;
+        }
+      } catch (err) {
+        console.debug('openAttachment blob 다운로드 실패:', candidate, err);
       }
+    }
+
+    const repairBuckets = Array.from(new Set(dedupedDownloadCandidates.map(c => c.bucket)));
+    for (const bucket of repairBuckets) {
+      if (!bucket || missingBucketsRef.current.has(bucket)) continue;
+      try {
+        const replacementPath = await findReplacementObjectPath(bucket, file.name || '', file.path || '');
+        if (!replacementPath) continue;
+        const recovered = await openByBlobDownload(bucket, replacementPath);
+        if (recovered) {
+          console.warn('openAttachment: 경로 불일치 파일 복구 열기 성공', {
+            bucket,
+            originalPath: file.path,
+            replacementPath
+          });
+          return;
+        }
+      } catch (err) {
+        console.debug('openAttachment 복구 탐색 실패:', bucket, err);
+      }
+    }
+
+    const urlCandidates: string[] = [];
+    if (file.url && !isSignedUrlWithoutToken(file.url)) {
+      urlCandidates.push(file.url);
     }
 
     for (const url of urlCandidates) {
@@ -520,7 +633,7 @@ function App() {
       const sanitizedName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
       const filePath = `mission_${timestamp}_${randomId}_${idx}_${sanitizedName}`;
 
-      const bucketCandidates = [storageBucket, 'mission-files', 'attachments'];
+      const bucketCandidates = [storageBucket, 'attachments', 'mission-files'];
       let uploadResult: any = { error: null };
       let usedBucket = storageBucket;
 
@@ -1645,7 +1758,7 @@ function App() {
                               <li key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <button
                                   type="button"
-                                  style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#f7f7f7', border: '1px solid #ccc', borderRadius: 6, cursor: 'pointer' }}
+                                  style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#f7f7f7', border: '1px solid #ccc', borderRadius: 6, cursor: 'pointer', color: '#1f2937', fontWeight: 600 }}
                                   onClick={async () => {
                                     await openAttachment(file);
                                   }}
@@ -1757,7 +1870,7 @@ function App() {
                 });
               }}
             />
-            <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#555' }}>
+            <div style={{ marginTop: 6, fontSize: '0.85rem', color: '#1f2937', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontWeight: 600 }}>
               선택된 파일: {missionFiles.length > 0 ? missionFiles.map(f => f.name).join(', ') : '없음'}
             </div>
           </div>
@@ -1907,7 +2020,7 @@ function App() {
                         <strong>첨부파일:</strong>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
                           {selectedMission.attachments.map((file, idx) => (
-                            <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px' }} onClick={() => openAttachment(file)}>
+                            <button key={idx} style={{ fontSize: '0.75rem', padding: '4px 8px', background: '#f3f4f6', color: '#1f2937', border: '1px solid #d1d5db', fontWeight: 600 }} onClick={() => openAttachment(file)}>
                               {file.name}
                             </button>
                           ))}

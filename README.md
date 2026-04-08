@@ -40,6 +40,8 @@ Supabase 프로젝트를 생성하고, 다음 테이블을 만든 뒤 URL/ANON K
 ```
 VITE_SUPABASE_URL=https://<your-project>.supabase.co
 VITE_SUPABASE_ANON_KEY=<your-anon-key>
+# 또는 새 프로젝트에서는 publishable key 사용
+VITE_SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
 ```
 
 ## 3. 실행
