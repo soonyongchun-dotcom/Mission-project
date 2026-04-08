@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Golf Mission Project">
+  <rect width="64" height="64" rx="12" fill="#0b3c68"/>
+  <circle cx="24" cy="24" r="10" fill="#ffffff"/>
+  <path d="M40 14 L52 20 L40 26 Z" fill="#20c997"/>
+  <rect x="39" y="14" width="2" height="36" fill="#20c997"/>
+  <rect x="18" y="34" width="28" height="4" rx="2" fill="#ffffff"/>
+</svg>
