@@ -289,24 +289,64 @@ function App() {
     return latestMissionStatusById[selectedPlayerMissionId];
   }, [latestMissionStatusById, selectedPlayerMissionId]);
 
-  const parseMissionDraftPayload = (rawNote: string | null | undefined): MissionDraftPayload => {
-    if (!rawNote) return { noteText: '', templateValues: {}, templateSchema: null };
+  const parseMissionDraftPayload = (rawNote: unknown): MissionDraftPayload => {
+    if (rawNote === null || rawNote === undefined) {
+      return { noteText: '', templateValues: {}, templateSchema: null };
+    }
+
+    const normalizePayloadObject = (obj: any): MissionDraftPayload | null => {
+      if (!obj || typeof obj !== 'object') return null;
+
+      const hasDraftShape =
+        Object.prototype.hasOwnProperty.call(obj, 'noteText') ||
+        Object.prototype.hasOwnProperty.call(obj, 'templateValues') ||
+        Object.prototype.hasOwnProperty.call(obj, 'templateSchema');
+      if (!hasDraftShape) return null;
+
+      const noteText =
+        typeof obj.noteText === 'string'
+          ? obj.noteText
+          : typeof obj.note === 'string'
+          ? obj.note
+          : '';
+
+      const templateValues =
+        obj.templateValues && typeof obj.templateValues === 'object' ? obj.templateValues : {};
+      const templateSchema =
+        obj.templateSchema && typeof obj.templateSchema === 'object'
+          ? (obj.templateSchema as MissionTemplate['schema_json'])
+          : null;
+
+      return { noteText, templateValues, templateSchema };
+    };
+
+    if (typeof rawNote === 'object') {
+      const normalized = normalizePayloadObject(rawNote as any);
+      if (normalized) return normalized;
+      return { noteText: JSON.stringify(rawNote), templateValues: {}, templateSchema: null };
+    }
+
+    if (typeof rawNote !== 'string') {
+      return { noteText: String(rawNote), templateValues: {}, templateSchema: null };
+    }
+
+    const trimmed = rawNote.trim();
+    if (!trimmed) return { noteText: '', templateValues: {}, templateSchema: null };
 
     try {
-      const parsed = JSON.parse(rawNote);
-      if (typeof parsed === 'object' && parsed !== null) {
-        const noteText = typeof (parsed as any).noteText === 'string' ? (parsed as any).noteText : rawNote;
-        const templateValuesRaw = (parsed as any).templateValues;
-        const templateValues = typeof templateValuesRaw === 'object' && templateValuesRaw !== null ? templateValuesRaw : {};
-        const templateSchemaRaw = (parsed as any).templateSchema;
-        const templateSchema =
-          typeof templateSchemaRaw === 'object' && templateSchemaRaw !== null
-            ? (templateSchemaRaw as MissionTemplate['schema_json'])
-            : null;
-        return { noteText, templateValues, templateSchema };
+      let parsed: any = JSON.parse(trimmed);
+      if (typeof parsed === 'string') {
+        try {
+          parsed = JSON.parse(parsed);
+        } catch {
+          return { noteText: parsed, templateValues: {}, templateSchema: null };
+        }
       }
+
+      const normalized = normalizePayloadObject(parsed);
+      if (normalized) return normalized;
     } catch {
-      // 기존 plain text 로그와 호환.
+      // plain text note fallback
     }
 
     return { noteText: rawNote, templateValues: {}, templateSchema: null };
@@ -321,11 +361,11 @@ function App() {
     return JSON.stringify(payload);
   };
 
-  const getLogDisplayNote = (rawNote: string) => {
+  const getLogDisplayNote = (rawNote: unknown) => {
     return parseMissionDraftPayload(rawNote).noteText || '없음';
   };
 
-  const getTemplateValueSummary = (missionId: number, rawNote: string) => {
+  const getTemplateValueSummary = (missionId: number, rawNote: unknown) => {
     const parsed = parseMissionDraftPayload(rawNote);
     const values = parsed.templateValues || {};
     const nonEmptyEntries = Object.entries(values).filter(([, v]) => `${v ?? ''}`.trim() !== '');
@@ -361,7 +401,7 @@ function App() {
     return `${nonEmptyEntries.length}항목 입력 · ${previews.join(', ')}`;
   };
 
-  const getTemplateTableRows = (missionId: number, rawNote: string) => {
+  const getTemplateTableRows = (missionId: number, rawNote: unknown) => {
     const parsed = parseMissionDraftPayload(rawNote);
     const values = parsed.templateValues || {};
     const nonEmptyEntries = Object.entries(values).filter(([, v]) => `${v ?? ''}`.trim() !== '');
