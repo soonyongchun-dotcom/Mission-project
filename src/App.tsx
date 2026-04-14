@@ -20,6 +20,7 @@ type Mission = {
   id: number;
   title: string;
   description: string;
+  description_raw?: string;
   category: Category;
   subcategory: SubCategory;
   created_by: string;
@@ -66,8 +67,113 @@ type MissionLog = {
   attachments?: { name: string; url: string; path: string }[];
 };
 
+type AttachmentMeta = { name: string; url: string; path: string; bucket?: string };
+
+type TemplateFieldType = 'text' | 'number' | 'select';
+
+type MissionTemplateField = {
+  key: string;
+  label: string;
+  type: TemplateFieldType;
+  required: boolean;
+  options?: string[];
+  placeholder?: string;
+  helpText?: string;
+};
+
+type TemplateMode = 'form' | 'grid';
+
+type GridTemplateConfig = {
+  title: string;
+  rowCount: number;
+  colCount: number;
+  rowHeaders: string[];
+  colHeaders: string[];
+  successThreshold: number;
+};
+
+type MissionTemplate = {
+  mission_id: number;
+  version: number;
+  status: 'draft' | 'published';
+  schema_json: {
+    mode?: TemplateMode;
+    fields: MissionTemplateField[];
+    grid?: GridTemplateConfig;
+  };
+};
+
+type MissionDraftPayload = {
+  noteText: string;
+  templateValues: Record<string, string>;
+  templateSchema?: MissionTemplate['schema_json'] | null;
+};
+
+const MISSION_TEMPLATE_DISABLED_STORAGE_KEY = 'mission_template_table_missing';
+const MISSION_DRAFT_STORAGE_PREFIX = 'mission_draft_v1';
+const MISSION_TEMPLATE_INLINE_PREFIX = '[MISSION_TEMPLATE_INLINE:';
+const MISSION_TEMPLATE_INLINE_SUFFIX = ']';
+let missionTemplateMissingGlobal = false;
+let missionTemplateLookupInFlight = false;
+
+const encodeBase64Utf8 = (value: string) => {
+  return btoa(unescape(encodeURIComponent(value)));
+};
+
+const decodeBase64Utf8 = (value: string) => {
+  return decodeURIComponent(escape(atob(value)));
+};
+
+const buildMissionDescriptionWithInlineTemplate = (
+  description: string,
+  schemaJson: MissionTemplate['schema_json'] | null
+) => {
+  const clean = (description || '').trim();
+  if (!schemaJson) return clean;
+  try {
+    const encoded = encodeBase64Utf8(JSON.stringify(schemaJson));
+    return `${clean}\n${MISSION_TEMPLATE_INLINE_PREFIX}${encoded}${MISSION_TEMPLATE_INLINE_SUFFIX}`;
+  } catch {
+    return clean;
+  }
+};
+
+const parseMissionDescriptionInlineTemplate = (
+  rawDescription: string | null | undefined
+): { cleanDescription: string; inlineTemplate: MissionTemplate['schema_json'] | null } => {
+  const text = rawDescription || '';
+  const markerStart = text.lastIndexOf(MISSION_TEMPLATE_INLINE_PREFIX);
+  if (markerStart < 0) {
+    return { cleanDescription: text, inlineTemplate: null };
+  }
+
+  const markerEnd = text.indexOf(MISSION_TEMPLATE_INLINE_SUFFIX, markerStart + MISSION_TEMPLATE_INLINE_PREFIX.length);
+  if (markerEnd < 0) {
+    return { cleanDescription: text, inlineTemplate: null };
+  }
+
+  const encoded = text.slice(markerStart + MISSION_TEMPLATE_INLINE_PREFIX.length, markerEnd).trim();
+  const cleanDescription = text.slice(0, markerStart).trimEnd();
+
+  try {
+    const parsed = JSON.parse(decodeBase64Utf8(encoded));
+    if (parsed && typeof parsed === 'object') {
+      return { cleanDescription, inlineTemplate: parsed as MissionTemplate['schema_json'] };
+    }
+  } catch {
+    // 인라인 템플릿 파싱 실패 시 일반 설명으로 폴백.
+  }
+
+  return { cleanDescription, inlineTemplate: null };
+};
+
+const getMissionDraftStorageKey = (playerId: string, missionId: number) => {
+  return `${MISSION_DRAFT_STORAGE_PREFIX}:${playerId}:${missionId}`;
+};
+
 function App() {
   const [role, setRole] = useState<Role>(null);
+  const isCoach = role === 'coach';
   const [loginId, setLoginId] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [requestedUsername, setRequestedUsername] = useState('');
@@ -80,10 +186,27 @@ function App() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [players, setPlayers] = useState<User[]>([]);
   const [newMission, setNewMission] = useState({ id: '', title: '', description: '' });
+  const [editingMissionId, setEditingMissionId] = useState<number | null>(null);
   const [assignTo, setAssignTo] = useState('all');
   const UNASSIGNED_CODE = 'unassigned';
   const UNASSIGNED_LABEL = '미정';
   const [missionFiles, setMissionFiles] = useState<File[]>([]);
+  const [newMissionTemplateFields, setNewMissionTemplateFields] = useState<MissionTemplateField[]>([]);
+  const [newTemplateMode, setNewTemplateMode] = useState<TemplateMode>('form');
+  const [newGridTitle, setNewGridTitle] = useState('');
+  const [newGridRows, setNewGridRows] = useState(6);
+  const [newGridCols, setNewGridCols] = useState(4);
+  const [newGridRowHeaders, setNewGridRowHeaders] = useState<string[]>([]);
+  const [newGridColHeaders, setNewGridColHeaders] = useState<string[]>([]);
+  const [newGridSuccessThreshold, setNewGridSuccessThreshold] = useState(1);
+  const [isTemplatePublishedForNewMission, setIsTemplatePublishedForNewMission] = useState(false);
+  const [showTemplateDesigner, setShowTemplateDesigner] = useState(false);
+  const [templateTableAvailable, setTemplateTableAvailable] = useState(() => {
+    if (missionTemplateMissingGlobal) return false;
+    if (typeof window === 'undefined') return true;
+    return window.localStorage.getItem(MISSION_TEMPLATE_DISABLED_STORAGE_KEY) !== '1';
+  });
+  const [missionTemplates, setMissionTemplates] = useState<Record<number, MissionTemplate>>({});
   const [storageBucket, setStorageBucket] = useState('attachments');
   const [missionLogs, setMissionLogs] = useState<MissionLog[]>([]);
   const [assignModalMission, setAssignModalMission] = useState<Mission | null>(null);
@@ -91,6 +214,9 @@ function App() {
   const [coachFeedback, setCoachFeedback] = useState<Record<number, string>>({});
   const [playerMissionNotes, setPlayerMissionNotes] = useState<Record<number, string>>({});
   const [playerMissionFiles, setPlayerMissionFiles] = useState<Record<number, File[]>>({});
+  const [playerDraftAttachments, setPlayerDraftAttachments] = useState<Record<number, AttachmentMeta[]>>({});
+  const [playerTemplateValues, setPlayerTemplateValues] = useState<Record<number, Record<string, string>>>({});
+  const [draftSaveStatus, setDraftSaveStatus] = useState<Record<number, string>>({});
 
   const [showShotConsistencyPanel, setShowShotConsistencyPanel] = useState(false);
   const [shotConsistencyUrl, setShotConsistencyUrl] = useState('');
@@ -109,6 +235,12 @@ function App() {
   const [showSubcategoryDropdown, setShowSubcategoryDropdown] = useState(false);
   const [playerPasswordInputs, setPlayerPasswordInputs] = useState<Record<string, string>>({});
   const missingBucketsRef = useRef<Set<string>>(new Set());
+  const lastSavedDraftNoteRef = useRef<Record<number, string>>({});
+  const lastSavedDraftPayloadRef = useRef<Record<number, string>>({});
+  const missionTemplateErrorNotifiedRef = useRef(false);
+  const missionTemplateDisabledRef = useRef(false);
+  const missionTemplateTableConfirmedRef = useRef(false);
+  const missionLogAttachmentsAvailableRef = useRef<boolean | null>(null);
 
   const filteredMissions = useMemo(() => {
     if (!category || !subcategory) return [];
@@ -129,12 +261,265 @@ function App() {
 
   const visibleMissions = selectedMissionId !== null ? filteredMissions.filter(m => m.id === selectedMissionId) : [];
 
-  const myMissionLogs = missionLogs.filter(log => log.player_id === currentPlayer);
+  const myMissionLogs = useMemo(() => {
+    return missionLogs.filter(log => log.player_id === currentPlayer);
+  }, [missionLogs, currentPlayer]);
+
   const missionLogsByMission = myMissionLogs.reduce<Record<number, MissionLog[]>>((acc, log) => {
     if (!acc[log.mission_id]) acc[log.mission_id] = [];
     acc[log.mission_id].push(log);
     return acc;
   }, {});
+
+  const latestMissionStatusById = useMemo(() => {
+    const sorted = [...myMissionLogs].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    const statusMap: Record<number, 'pending' | 'completed'> = {};
+    for (const log of sorted) {
+      if (!statusMap[log.mission_id]) {
+        statusMap[log.mission_id] = log.status;
+      }
+    }
+    return statusMap;
+  }, [myMissionLogs]);
+
+  const selectedPlayerMissionStatus = useMemo(() => {
+    if (!selectedPlayerMissionId) return undefined;
+    return latestMissionStatusById[selectedPlayerMissionId];
+  }, [latestMissionStatusById, selectedPlayerMissionId]);
+
+  const parseMissionDraftPayload = (rawNote: string | null | undefined): MissionDraftPayload => {
+    if (!rawNote) return { noteText: '', templateValues: {}, templateSchema: null };
+
+    try {
+      const parsed = JSON.parse(rawNote);
+      if (typeof parsed === 'object' && parsed !== null) {
+        const noteText = typeof (parsed as any).noteText === 'string' ? (parsed as any).noteText : rawNote;
+        const templateValuesRaw = (parsed as any).templateValues;
+        const templateValues = typeof templateValuesRaw === 'object' && templateValuesRaw !== null ? templateValuesRaw : {};
+        const templateSchemaRaw = (parsed as any).templateSchema;
+        const templateSchema =
+          typeof templateSchemaRaw === 'object' && templateSchemaRaw !== null
+            ? (templateSchemaRaw as MissionTemplate['schema_json'])
+            : null;
+        return { noteText, templateValues, templateSchema };
+      }
+    } catch {
+      // 기존 plain text 로그와 호환.
+    }
+
+    return { noteText: rawNote, templateValues: {}, templateSchema: null };
+  };
+
+  const buildMissionDraftPayload = (missionId: number, noteText: string): string => {
+    const payload: MissionDraftPayload = {
+      noteText: noteText || '',
+      templateValues: playerTemplateValues[missionId] || {},
+      templateSchema: missionTemplates[missionId]?.schema_json || null,
+    };
+    return JSON.stringify(payload);
+  };
+
+  const getLogDisplayNote = (rawNote: string) => {
+    return parseMissionDraftPayload(rawNote).noteText || '없음';
+  };
+
+  const getTemplateValueSummary = (missionId: number, rawNote: string) => {
+    const parsed = parseMissionDraftPayload(rawNote);
+    const values = parsed.templateValues || {};
+    const nonEmptyEntries = Object.entries(values).filter(([, v]) => `${v ?? ''}`.trim() !== '');
+    if (nonEmptyEntries.length === 0) return '없음';
+
+    const templateFromPayload = parsed.templateSchema
+      ? {
+          mission_id: missionId,
+          version: 1,
+          status: 'published' as const,
+          schema_json: parsed.templateSchema,
+        }
+      : null;
+    const template = missionTemplates[missionId] || templateFromPayload;
+    const mode = template?.schema_json?.mode || 'form';
+
+    if (mode === 'grid' && template?.schema_json?.grid) {
+      const grid = template.schema_json.grid;
+      const previews = nonEmptyEntries.slice(0, 6).map(([key, value]) => {
+        const match = key.match(/^cell_r(\d+)_c(\d+)$/);
+        if (!match) return `${key}: ${value}`;
+        const row = Number(match[1]);
+        const col = Number(match[2]);
+        const rowLabel = grid.rowHeaders[row] || `행${row + 1}`;
+        const colLabel = grid.colHeaders[col] || `열${col + 1}`;
+        return `${rowLabel}/${colLabel}: ${value}`;
+      });
+      return `${nonEmptyEntries.length}칸 입력 · ${previews.join(', ')}`;
+    }
+
+    const fieldsByKey = new Map((template?.schema_json?.fields || []).map(field => [field.key, field.label]));
+    const previews = nonEmptyEntries.slice(0, 6).map(([key, value]) => `${fieldsByKey.get(key) || key}: ${value}`);
+    return `${nonEmptyEntries.length}항목 입력 · ${previews.join(', ')}`;
+  };
+
+  const getTemplateTableRows = (missionId: number, rawNote: string) => {
+    const parsed = parseMissionDraftPayload(rawNote);
+    const values = parsed.templateValues || {};
+    const nonEmptyEntries = Object.entries(values).filter(([, v]) => `${v ?? ''}`.trim() !== '');
+    if (nonEmptyEntries.length === 0) return null;
+
+    const templateFromPayload = parsed.templateSchema
+      ? {
+          mission_id: missionId,
+          version: 1,
+          status: 'published' as const,
+          schema_json: parsed.templateSchema,
+        }
+      : null;
+    const template = missionTemplates[missionId] || templateFromPayload;
+    const mode = template?.schema_json?.mode || 'form';
+
+    if (mode === 'grid' && template?.schema_json?.grid) {
+      const grid = template.schema_json.grid;
+      const rows = Array.from({ length: grid.rowCount }).map((_, r) => {
+        const label = grid.rowHeaders[r] || `행 ${r + 1}`;
+        const cells = Array.from({ length: grid.colCount }).map((__, c) => {
+          const key = `cell_r${r}_c${c}`;
+          return values[key] || '';
+        });
+        return { label, cells };
+      });
+
+      return {
+        mode: 'grid' as const,
+        title: grid.title || '입력 시트',
+        headers: grid.colHeaders.map((h, i) => h || `열 ${i + 1}`),
+        rows,
+      };
+    }
+
+    const fieldsByKey = new Map((template?.schema_json?.fields || []).map(field => [field.key, field.label]));
+    const rows = nonEmptyEntries.map(([key, value]) => ({
+      label: fieldsByKey.get(key) || key,
+      value: `${value}`,
+    }));
+
+    return {
+      mode: 'form' as const,
+      rows,
+    };
+  };
+
+  const isMissingMissionTemplateTableError = (error: any) => {
+    const errorText = `${error?.code || ''} ${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+    return (
+      errorText.includes('does not exist') ||
+      errorText.includes('relation') ||
+      errorText.includes('schema cache') ||
+      errorText.includes('not found') ||
+      error?.code === 'PGRST205'
+    );
+  };
+
+  const isMissingMissionLogAttachmentsColumnError = (error: any) => {
+    const errorText = `${error?.code || ''} ${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+    return (
+      errorText.includes('attachments') &&
+      (errorText.includes('column') ||
+        errorText.includes('does not exist') ||
+        errorText.includes('schema cache') ||
+        errorText.includes('not found') ||
+        error?.code === 'PGRST204')
+    );
+  };
+
+  const disableMissionTemplateFeature = () => {
+    missionTemplateMissingGlobal = true;
+    missionTemplateDisabledRef.current = true;
+    setTemplateTableAvailable(false);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(MISSION_TEMPLATE_DISABLED_STORAGE_KEY, '1');
+    }
+    if (!missionTemplateErrorNotifiedRef.current) {
+      console.warn('mission_templates 테이블이 없어 템플릿 기능 호출을 중단합니다. 테이블 생성 후 다시 사용 가능합니다.');
+      missionTemplateErrorNotifiedRef.current = true;
+    }
+  };
+
+  const publishMissionTemplate = async (missionId: number, schemaJson: MissionTemplate['schema_json']) => {
+    if (missionTemplateDisabledRef.current || !templateTableAvailable) return;
+
+    const latestTemplate = await supabase
+      .from('mission_templates')
+      .select('version')
+      .eq('mission_id', missionId)
+      .eq('status', 'published')
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestTemplate.error) {
+      if (isMissingMissionTemplateTableError(latestTemplate.error)) {
+        disableMissionTemplateFeature();
+      } else {
+        console.warn('mission_templates 최신 버전 조회 실패:', latestTemplate.error.message);
+      }
+      return;
+    }
+
+    missionTemplateTableConfirmedRef.current = true;
+
+    const nextVersion = (latestTemplate.data?.version ?? 0) + 1;
+    const templateInsert = await supabase.from('mission_templates').insert([
+      {
+        mission_id: missionId,
+        version: nextVersion,
+        status: 'published',
+        schema_json: schemaJson,
+      }
+    ]);
+
+    if (templateInsert.error) {
+      if (isMissingMissionTemplateTableError(templateInsert.error)) {
+        disableMissionTemplateFeature();
+      } else {
+        console.warn('mission_templates 저장 실패:', templateInsert.error.message);
+      }
+    } else {
+      missionTemplateTableConfirmedRef.current = true;
+    }
+  };
+
+  const coachCompletedLogs = useMemo(() => {
+    return [...missionLogs]
+      .filter(log => log.status === 'completed')
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }, [missionLogs]);
+
+  const coachCompletedSummary = useMemo(() => {
+    const completedCount = coachCompletedLogs.length;
+    const uniquePlayerCount = new Set(coachCompletedLogs.map(log => log.player_id)).size;
+    const recentCompletedAt = coachCompletedLogs[0]?.created_at || null;
+    const missionCounter: Record<number, number> = {};
+
+    coachCompletedLogs.forEach(log => {
+      missionCounter[log.mission_id] = (missionCounter[log.mission_id] || 0) + 1;
+    });
+
+    const missionRanking = Object.entries(missionCounter)
+      .map(([missionId, count]) => {
+        const idNum = Number(missionId);
+        const mission = missions.find(m => m.id === idNum);
+        return {
+          missionId: idNum,
+          count,
+          title: mission?.title || `미션 #${missionId}`,
+        };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return { completedCount, uniquePlayerCount, recentCompletedAt, missionRanking };
+  }, [coachCompletedLogs, missions]);
 
   const loadMissions = async () => {
     const { data, error } = await supabase
@@ -148,7 +533,10 @@ function App() {
     }
 
     if (data) {
+      const inlineTemplateMap: Record<number, MissionTemplate> = {};
+
       const missionsWithNames = (data as Mission[]).map(m => {
+        const parsedInline = parseMissionDescriptionInlineTemplate(m.description);
         const normalizedAssignedTo = m.assigned_to === UNASSIGNED_LABEL ? UNASSIGNED_CODE : m.assigned_to;
         const player = players.find(p => p.id === normalizedAssignedTo);
         const assignedName = player
@@ -156,9 +544,37 @@ function App() {
           : normalizedAssignedTo === UNASSIGNED_CODE
           ? UNASSIGNED_LABEL
           : normalizedAssignedTo;
-        return { ...m, assigned_to: normalizedAssignedTo, assigned_name: assignedName };
+
+        if (parsedInline.inlineTemplate) {
+          inlineTemplateMap[m.id] = {
+            mission_id: m.id,
+            version: 1,
+            status: 'published',
+            schema_json: parsedInline.inlineTemplate,
+          };
+        }
+
+        return {
+          ...m,
+          description: parsedInline.cleanDescription,
+          description_raw: m.description,
+          assigned_to: normalizedAssignedTo,
+          assigned_name: assignedName,
+        };
       });
       setMissions(missionsWithNames);
+      if (Object.keys(inlineTemplateMap).length > 0) {
+        setMissionTemplates(prev => {
+          const merged = { ...prev };
+          Object.entries(inlineTemplateMap).forEach(([missionId, template]) => {
+            const id = Number(missionId);
+            if (!merged[id]) {
+              merged[id] = template;
+            }
+          });
+          return merged;
+        });
+      }
     }
   };
 
@@ -470,6 +886,55 @@ function App() {
     if (data) setMissionLogs(data);
   };
 
+  const loadMissionTemplates = async (missionIds: number[]) => {
+    if (
+      missionTemplateMissingGlobal ||
+      missionTemplateDisabledRef.current ||
+      missionTemplateLookupInFlight ||
+      !templateTableAvailable ||
+      missionIds.length === 0
+    ) {
+      return;
+    }
+
+    const uniqueMissionIds = Array.from(new Set(missionIds));
+    missionTemplateLookupInFlight = true;
+
+    const { data, error } = await supabase
+      .from('mission_templates')
+      .select('mission_id, version, status, schema_json')
+      .in('mission_id', uniqueMissionIds)
+      .eq('status', 'published')
+      .order('version', { ascending: false });
+
+    missionTemplateLookupInFlight = false;
+
+    if (error) {
+      if (isMissingMissionTemplateTableError(error)) {
+        disableMissionTemplateFeature();
+      } else {
+        console.warn('mission_templates 조회 실패:', error.message);
+      }
+      return;
+    }
+
+    missionTemplateTableConfirmedRef.current = true;
+
+    if (!data) return;
+
+    const mapped: Record<number, MissionTemplate> = {};
+    (data as MissionTemplate[]).forEach(t => {
+      if (!mapped[t.mission_id]) mapped[t.mission_id] = t;
+    });
+    setMissionTemplates(prev => {
+      const merged = { ...prev };
+      Object.entries(mapped).forEach(([missionId, template]) => {
+        merged[Number(missionId)] = template;
+      });
+      return merged;
+    });
+  };
+
   useEffect(() => {
     const init = async () => {
       await loadPlayers();
@@ -479,6 +944,27 @@ function App() {
     };
     init();
   }, []);
+
+  useEffect(() => {
+    if (!missions.length) return;
+    loadMissionTemplates(missions.map(m => m.id));
+  }, [missions, templateTableAvailable]);
+
+  useEffect(() => {
+    setNewGridRowHeaders(prev => {
+      const next = [...prev];
+      while (next.length < newGridRows) next.push(`조건 ${next.length + 1}`);
+      return next.slice(0, newGridRows);
+    });
+  }, [newGridRows]);
+
+  useEffect(() => {
+    setNewGridColHeaders(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push(`항목 ${next.length + 1}`);
+      return next.slice(0, newGridCols);
+    });
+  }, [newGridCols]);
 
   const handleLogin = async () => {
     if (!loginId.trim()) return alert('아이디를 입력해주세요');
@@ -532,11 +1018,63 @@ function App() {
 
   };
 
+  const resetMissionEditor = () => {
+    setEditingMissionId(null);
+    setNewMission({ id: '', title: '', description: '' });
+    setAssignTo('all');
+    setMissionFiles([]);
+    setNewMissionTemplateFields([]);
+    setNewTemplateMode('form');
+    setNewGridTitle('');
+    setNewGridRows(6);
+    setNewGridCols(4);
+    setNewGridRowHeaders([]);
+    setNewGridColHeaders([]);
+    setNewGridSuccessThreshold(1);
+    setIsTemplatePublishedForNewMission(false);
+  };
+
+  const loadMissionIntoEditor = (mission: Mission) => {
+    const inlineTemplate = parseMissionDescriptionInlineTemplate(mission.description_raw || mission.description).inlineTemplate;
+    const schema = missionTemplates[mission.id]?.schema_json || inlineTemplate;
+
+    setEditingMissionId(mission.id);
+    setSelectedMissionId(mission.id);
+    setCategory(mission.category);
+    setSubcategory(mission.subcategory);
+    setNewMission({ id: String(mission.id), title: mission.title, description: mission.description });
+    setAssignTo(mission.assigned_to === UNASSIGNED_LABEL ? UNASSIGNED_CODE : mission.assigned_to);
+    setMissionFiles([]);
+
+    if (schema) {
+      const mode = schema.mode || 'form';
+      setIsTemplatePublishedForNewMission(true);
+      setNewTemplateMode(mode);
+      if (mode === 'grid' && schema.grid) {
+        setNewGridTitle(schema.grid.title || mission.title);
+        setNewGridRows(schema.grid.rowCount || 6);
+        setNewGridCols(schema.grid.colCount || 4);
+        setNewGridRowHeaders(schema.grid.rowHeaders || []);
+        setNewGridColHeaders(schema.grid.colHeaders || []);
+        setNewGridSuccessThreshold(schema.grid.successThreshold || 1);
+        setNewMissionTemplateFields([]);
+      } else {
+        setNewMissionTemplateFields(schema.fields || []);
+      }
+    } else {
+      setIsTemplatePublishedForNewMission(false);
+      setNewTemplateMode('form');
+      setNewMissionTemplateFields([]);
+    }
+  };
+
   const handleAddMission = async () => {
     if (!currentCoach) {
       alert('코치로 로그인된 상태여야 합니다.');
       return;
     }
+
+    const isEditMode = editingMissionId !== null;
 
     if (!newMission.title.trim() || !newMission.description.trim()) {
       alert('미션 제목/설명을 모두 입력해주세요.');
@@ -548,45 +1086,53 @@ function App() {
       return;
     }
 
-    const mission: any = {
-      title: newMission.title,
-      description: newMission.description,
-      category,
-      subcategory,
-      created_by: currentCoach,
-      assigned_to: assignTo,
-      attachments: [],
-      inserted_at: new Date().toISOString()
-    };
+    const hasFormTemplate = newTemplateMode === 'form' && newMissionTemplateFields.length > 0;
+    const hasGridTemplate =
+      newTemplateMode === 'grid' &&
+      newGridRows > 0 &&
+      newGridCols > 0 &&
+      newGridRowHeaders.length === newGridRows &&
+      newGridColHeaders.length === newGridCols;
 
-    if (newMission.id.trim()) {
-      mission.id = Number(newMission.id);
-    } else {
-      // DB에 id 기본값이 없을 때를 대비해 클라이언트에서 id를 채워넣기.
-      try {
-        const { data: maxIdData, error: maxIdError } = await supabase
-          .from('missions')
-          .select('id')
-          .order('id', { ascending: false })
-          .limit(1);
-
-        if (maxIdError) {
-          console.warn('max id 조회 실패, fallback으로 timestamp id 사용:', maxIdError);
-          mission.id = Math.floor(Date.now() / 1000);
-        } else {
-          const nextId = (maxIdData?.[0]?.id ?? 0) + 1;
-          mission.id = nextId;
-        }
-      } catch (e) {
-        console.warn('max id 조회 도중 예외, timestamp id 사용:', e);
-        mission.id = Math.floor(Date.now() / 1000);
+    if (templateTableAvailable && !isEditMode) {
+      if (!isTemplatePublishedForNewMission || (!hasFormTemplate && !hasGridTemplate)) {
+        alert('미션 템플릿 설계 후 배포를 완료해야 미션을 등록할 수 있습니다.');
+        return;
       }
     }
 
-    if (!mission.id) {
-      // 혹시라도 위에서 실패하면 1000 기반 id 추가로 보장
-      mission.id = Math.floor(Date.now() / 1000);
-    }
+    const editingMission = isEditMode ? missions.find(m => m.id === editingMissionId) : null;
+    const existingTemplateSchema = editingMission
+      ? missionTemplates[editingMission.id]?.schema_json ||
+        parseMissionDescriptionInlineTemplate(editingMission.description_raw || editingMission.description).inlineTemplate
+      : null;
+
+    const draftTemplateSchema: MissionTemplate['schema_json'] | null =
+      (hasFormTemplate || hasGridTemplate)
+        ? newTemplateMode === 'grid'
+          ? {
+              mode: 'grid' as TemplateMode,
+              fields: [] as MissionTemplateField[],
+              grid: {
+                title: newGridTitle || newMission.title,
+                rowCount: newGridRows,
+                colCount: newGridCols,
+                rowHeaders: newGridRowHeaders,
+                colHeaders: newGridColHeaders,
+                successThreshold: newGridSuccessThreshold,
+              },
+            }
+          : {
+              mode: 'form' as TemplateMode,
+              fields: newMissionTemplateFields,
+            }
+        : null;
+
+    // mission_templates 테이블 유무와 무관하게, 설계된 템플릿은 미션 본문에 함께 보존한다.
+    const schemaJsonForMission: MissionTemplate['schema_json'] | null = draftTemplateSchema || existingTemplateSchema;
+
+    const normalizedAssignTo = assignTo === UNASSIGNED_LABEL ? UNASSIGNED_CODE : assignTo;
+    let uploadedAttachments: AttachmentMeta[] = [];
 
     if (missionFiles && missionFiles.length > 0) {
       try {
@@ -598,7 +1144,7 @@ function App() {
       }
 
       try {
-        mission.attachments = await uploadMissionFiles(missionFiles);
+        uploadedAttachments = await uploadMissionFiles(missionFiles);
       } catch (uploadError: any) {
         console.error('파일 업로드 실패:', uploadError);
         alert('파일 업로드 중 오류가 발생했습니다. 콘솔을 확인하세요: ' + (uploadError?.message || uploadError));
@@ -606,16 +1152,98 @@ function App() {
       }
     }
 
-    const { data, error } = await supabase.from('missions').insert([mission]).select();
-    if (error) {
-      console.error('미션 등록 실패:', error);
-      alert('미션 등록 실패: ' + (error?.message || JSON.stringify(error)));
-      return;
+    let targetMissionId: number | null = null;
+
+    if (isEditMode && editingMissionId !== null) {
+      const mergedAttachments = [...(editingMission?.attachments || []), ...uploadedAttachments];
+      const updatePayload = {
+        title: newMission.title,
+        description: buildMissionDescriptionWithInlineTemplate(newMission.description, schemaJsonForMission),
+        category,
+        subcategory,
+        assigned_to: normalizedAssignTo,
+        attachments: mergedAttachments,
+      };
+
+      const { error: updateError } = await supabase
+        .from('missions')
+        .update(updatePayload)
+        .eq('id', editingMissionId);
+
+      if (updateError) {
+        console.error('미션 수정 실패:', updateError);
+        alert('미션 수정 실패: ' + (updateError?.message || JSON.stringify(updateError)));
+        return;
+      }
+
+      targetMissionId = editingMissionId;
+    } else {
+      const mission: any = {
+        title: newMission.title,
+        description: buildMissionDescriptionWithInlineTemplate(newMission.description, schemaJsonForMission),
+        category,
+        subcategory,
+        created_by: currentCoach,
+        assigned_to: normalizedAssignTo,
+        attachments: uploadedAttachments,
+        inserted_at: new Date().toISOString()
+      };
+
+      if (newMission.id.trim()) {
+        mission.id = Number(newMission.id);
+      } else {
+        // DB에 id 기본값이 없을 때를 대비해 클라이언트에서 id를 채워넣기.
+        try {
+          const { data: maxIdData, error: maxIdError } = await supabase
+            .from('missions')
+            .select('id')
+            .order('id', { ascending: false })
+            .limit(1);
+
+          if (maxIdError) {
+            console.warn('max id 조회 실패, fallback으로 timestamp id 사용:', maxIdError);
+            mission.id = Math.floor(Date.now() / 1000);
+          } else {
+            const nextId = (maxIdData?.[0]?.id ?? 0) + 1;
+            mission.id = nextId;
+          }
+        } catch (e) {
+          console.warn('max id 조회 도중 예외, timestamp id 사용:', e);
+          mission.id = Math.floor(Date.now() / 1000);
+        }
+      }
+
+      if (!mission.id) {
+        // 혹시라도 위에서 실패하면 1000 기반 id 추가로 보장
+        mission.id = Math.floor(Date.now() / 1000);
+      }
+
+      const { data, error } = await supabase.from('missions').insert([mission]).select();
+      if (error) {
+        console.error('미션 등록 실패:', error);
+        alert('미션 등록 실패: ' + (error?.message || JSON.stringify(error)));
+        return;
+      }
+
+      targetMissionId = data?.[0]?.id ?? mission.id;
     }
 
-    setNewMission({ id: '', title: '', description: '' });
-    setAssignTo('all');
-    setMissionFiles([]);
+    if (targetMissionId && schemaJsonForMission && isTemplatePublishedForNewMission) {
+      await publishMissionTemplate(targetMissionId, schemaJsonForMission);
+      setMissionTemplates(prev => ({
+        ...prev,
+        [targetMissionId as number]: {
+          mission_id: targetMissionId as number,
+          version: (prev[targetMissionId as number]?.version ?? 0) + 1,
+          status: 'published',
+          schema_json: schemaJsonForMission,
+        }
+      }));
+    }
+
+    const successMessage = isEditMode ? '미션이 수정되었습니다.' : '미션이 등록되었습니다.';
+    alert(successMessage);
+    resetMissionEditor();
     loadMissions();
   };
 
@@ -675,6 +1303,115 @@ function App() {
     return attachments;
   };
 
+  const saveMissionDraft = async (
+    missionId: number,
+    options?: { includeFiles?: boolean; silent?: boolean }
+  ) => {
+    if (!currentPlayer) return;
+
+    const includeFiles = options?.includeFiles === true;
+    const silent = options?.silent === true;
+    const note = (playerMissionNotes[missionId] || '').trim();
+    const templateValues = playerTemplateValues[missionId] || {};
+    const hasTemplateValues = Object.values(templateValues).some(value => `${value ?? ''}`.trim() !== '');
+    const draftPayloadNote = buildMissionDraftPayload(missionId, note || '임시 저장');
+
+    if (!note && !hasTemplateValues) {
+      if (!silent) {
+        alert('임시 저장할 내용이 없습니다.');
+      }
+      return;
+    }
+
+    setDraftSaveStatus(prev => ({ ...prev, [missionId]: '임시 저장 중...' }));
+
+    try {
+      const storageKey = getMissionDraftStorageKey(currentPlayer, missionId);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(storageKey, draftPayloadNote);
+      }
+    } catch (e: any) {
+      console.warn('로컬 임시 저장 실패:', e);
+      setDraftSaveStatus(prev => ({ ...prev, [missionId]: '임시 저장 실패' }));
+      if (!silent) {
+        alert('임시 저장 실패: 브라우저 저장소를 확인하세요.');
+      }
+      return;
+    }
+
+    lastSavedDraftNoteRef.current[missionId] = note;
+    lastSavedDraftPayloadRef.current[missionId] = draftPayloadNote;
+    setDraftSaveStatus(prev => ({ ...prev, [missionId]: `임시 저장됨 (${new Date().toLocaleTimeString()})` }));
+
+    if (!silent) {
+      const fileHint = includeFiles ? ' 파일은 완료 제출 시 업로드됩니다.' : '';
+      alert(`임시 저장되었습니다. 언제든 이어서 입력할 수 있습니다.${fileHint}`);
+    }
+  };
+
+  useEffect(() => {
+    if (isCoach || !currentPlayer || !selectedPlayerMissionId) return;
+
+    const missionId = selectedPlayerMissionId;
+    const isCompleted = selectedPlayerMissionStatus === 'completed';
+    if (isCompleted) return;
+
+    let cancelled = false;
+    const loadDraft = async () => {
+      if (cancelled) return;
+
+      try {
+        const storageKey = getMissionDraftStorageKey(currentPlayer, missionId);
+        const rawDraft = typeof window !== 'undefined' ? window.localStorage.getItem(storageKey) : null;
+
+        if (!rawDraft) {
+          setDraftSaveStatus(prev => ({ ...prev, [missionId]: '로컬 임시저장 없음' }));
+          return;
+        }
+
+        const parsed = parseMissionDraftPayload(rawDraft);
+        setPlayerMissionNotes(prev => ({ ...prev, [missionId]: parsed.noteText || '' }));
+        setPlayerTemplateValues(prev => ({ ...prev, [missionId]: parsed.templateValues || {} }));
+        lastSavedDraftNoteRef.current[missionId] = (parsed.noteText || '').trim();
+        lastSavedDraftPayloadRef.current[missionId] = rawDraft;
+        setDraftSaveStatus(prev => ({ ...prev, [missionId]: '로컬 임시저장 불러옴' }));
+      } catch (e: any) {
+        console.warn('로컬 임시저장 불러오기 실패:', e);
+      }
+    };
+
+    loadDraft();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPlayerMissionId, currentPlayer, isCoach, selectedPlayerMissionStatus]);
+
+  useEffect(() => {
+    if (isCoach || !currentPlayer || !selectedPlayerMissionId) return;
+
+    const missionId = selectedPlayerMissionId;
+    const isCompleted = selectedPlayerMissionStatus === 'completed';
+    if (isCompleted) return;
+
+    const note = (playerMissionNotes[missionId] || '').trim();
+    const templateValues = playerTemplateValues[missionId] || {};
+    const hasTemplateValues = Object.values(templateValues).some(value => `${value ?? ''}`.trim() !== '');
+    if (!note && !hasTemplateValues) return;
+
+    const payloadSnapshot = buildMissionDraftPayload(missionId, note || '임시 저장');
+    if (lastSavedDraftPayloadRef.current[missionId] === payloadSnapshot) return;
+
+    setDraftSaveStatus(prev => ({ ...prev, [missionId]: '자동 저장 대기...' }));
+    const timer = window.setTimeout(() => {
+      saveMissionDraft(missionId, { includeFiles: false, silent: true });
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [playerMissionNotes, playerTemplateValues, selectedPlayerMissionId, currentPlayer, isCoach, selectedPlayerMissionStatus]);
+
   const handleSendPlayerComment = async (missionId: number) => {
     if (!currentPlayer) {
       alert('선수로 로그인된 상태여야 합니다.');
@@ -716,10 +1453,48 @@ function App() {
       return;
     }
 
-    const note = playerMissionNotes[missionId]?.trim() || '완료';
-    const files = playerMissionFiles[missionId] || [];
+    if (latestMissionStatusById[missionId] === 'completed') {
+      alert('이미 완료 제출된 미션입니다.');
+      return;
+    }
 
-    let attachments: { name: string; url: string; path: string }[] = [];
+    const note = playerMissionNotes[missionId]?.trim() || '';
+    const template = missionTemplates[missionId];
+    const templateValues = playerTemplateValues[missionId] || {};
+    const templateMode = template?.schema_json?.mode || 'form';
+    const requiredFields = template?.schema_json?.fields?.filter(field => field.required) || [];
+    const missingRequired = requiredFields.filter(field => !(templateValues[field.key] || '').toString().trim());
+
+    if (templateMode === 'grid' && template?.schema_json?.grid) {
+      const grid = template.schema_json.grid;
+      const missingCells: string[] = [];
+      for (let r = 0; r < grid.rowCount; r++) {
+        for (let c = 0; c < grid.colCount; c++) {
+          const cellKey = `cell_r${r}_c${c}`;
+          if (!(templateValues[cellKey] || '').toString().trim()) {
+            missingCells.push(`${grid.rowHeaders[r] || `행${r + 1}`} / ${grid.colHeaders[c] || `열${c + 1}`}`);
+          }
+        }
+      }
+      if (missingCells.length > 0) {
+        alert(`빈칸 입력이 남아 있습니다. 예: ${missingCells.slice(0, 3).join(', ')}${missingCells.length > 3 ? ' ...' : ''}`);
+        return;
+      }
+    }
+
+    if (missingRequired.length > 0) {
+      alert(`필수 입력 항목이 누락되었습니다: ${missingRequired.map(field => field.label).join(', ')}`);
+      return;
+    }
+
+    if (!note && requiredFields.length === 0) {
+      alert('미션 결과 내용을 입력해주세요.');
+      return;
+    }
+    const files = playerMissionFiles[missionId] || [];
+    const draftAttachments = playerDraftAttachments[missionId] || [];
+
+    let attachments: AttachmentMeta[] = [];
     try {
       attachments = await uploadMissionFiles(files);
     } catch (uploadError: any) {
@@ -727,9 +1502,15 @@ function App() {
       return;
     }
 
+    const mergedCompletionAttachments = Array.from(
+      new Map([...draftAttachments, ...attachments].map(file => [file.path, file])).values()
+    );
+
     const mission = missions.find(m => m.id === missionId);
-    if (mission && attachments.length > 0) {
-      const merged = [...(mission.attachments || []), ...attachments];
+    if (mission && mergedCompletionAttachments.length > 0) {
+      const merged = Array.from(
+        new Map([...(mission.attachments || []), ...mergedCompletionAttachments].map(file => [file.path, file])).values()
+      );
       const { error: updateError } = await supabase
         .from('missions')
         .update({ attachments: merged })
@@ -739,26 +1520,64 @@ function App() {
       }
     }
 
-    const { data, error } = await supabase
-      .from('mission_logs')
-      .insert([
-        {
-          mission_id: missionId,
-          player_id: currentPlayer,
-          status: 'completed',
-          note,
-          coach_feedback: null
-        }
-      ])
-      .select();
+    const completedPayloadBase = {
+      mission_id: missionId,
+      player_id: currentPlayer,
+      status: 'completed' as const,
+      note: buildMissionDraftPayload(missionId, note || '완료'),
+      coach_feedback: null,
+    };
 
-    if (error || !data) {
-      alert('미션 완료 제출 실패: ' + error?.message);
-      return;
+    let submitError: any = null;
+    let submitted = false;
+
+    if (missionLogAttachmentsAvailableRef.current !== false) {
+      const withAttachments = await supabase
+        .from('mission_logs')
+        .insert([
+          {
+            ...completedPayloadBase,
+            attachments: mergedCompletionAttachments,
+          }
+        ])
+        .select();
+
+      if (!withAttachments.error && withAttachments.data) {
+        missionLogAttachmentsAvailableRef.current = true;
+        submitted = true;
+      } else if (withAttachments.error && isMissingMissionLogAttachmentsColumnError(withAttachments.error)) {
+        missionLogAttachmentsAvailableRef.current = false;
+      } else {
+        submitError = withAttachments.error;
+      }
+    }
+
+    if (!submitted) {
+      const fallback = await supabase
+        .from('mission_logs')
+        .insert([completedPayloadBase])
+        .select();
+
+      if (fallback.error || !fallback.data) {
+        alert('미션 완료 제출 실패: ' + (fallback.error?.message || submitError?.message || 'unknown error'));
+        return;
+      }
     }
 
     setPlayerMissionNotes(prev => ({ ...prev, [missionId]: '' }));
     setPlayerMissionFiles(prev => ({ ...prev, [missionId]: [] }));
+    setPlayerDraftAttachments(prev => ({ ...prev, [missionId]: [] }));
+    setDraftSaveStatus(prev => ({ ...prev, [missionId]: '완료 제출됨' }));
+    lastSavedDraftNoteRef.current[missionId] = '';
+    lastSavedDraftPayloadRef.current[missionId] = '';
+    try {
+      const storageKey = getMissionDraftStorageKey(currentPlayer, missionId);
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(storageKey);
+      }
+    } catch (e) {
+      console.warn('로컬 임시저장 삭제 실패:', e);
+    }
     loadMissionLogs();
     loadMissions();
     alert('미션이 완료 제출되었습니다.');
@@ -891,13 +1710,75 @@ function App() {
     if (!confirmed) return;
 
     const mission = missions.find(m => m.id === missionId);
-    if (mission?.attachments?.length) {
-      for (const attachment of mission.attachments) {
-        const { error: removeError } = await supabase.storage.from(storageBucket).remove([attachment.path]);
-        if (removeError) {
-          console.warn('첨부파일 삭제 실패:', attachment.path, removeError);
+
+    const { data: logRows, error: logRowsError } = await supabase
+      .from('mission_logs')
+      .select('attachments')
+      .eq('mission_id', missionId);
+
+    if (logRowsError) {
+      console.warn('미션 로그 첨부 조회 실패:', logRowsError.message);
+    }
+
+    const attachmentMap = new Map<string, AttachmentMeta>();
+    (mission?.attachments || []).forEach(file => {
+      if (file?.path) attachmentMap.set(`${file.bucket || ''}:${file.path}`, file as AttachmentMeta);
+    });
+
+    (logRows || []).forEach((row: any) => {
+      const files = Array.isArray(row?.attachments) ? (row.attachments as AttachmentMeta[]) : [];
+      files.forEach(file => {
+        if (file?.path) attachmentMap.set(`${file.bucket || ''}:${file.path}`, file);
+      });
+    });
+
+    for (const attachment of attachmentMap.values()) {
+      const bucketCandidates = Array.from(new Set([
+        attachment.bucket,
+        storageBucket,
+        'attachments',
+        'mission-files',
+      ].filter(Boolean) as string[]));
+
+      let removed = false;
+      for (const bucket of bucketCandidates) {
+        const { error: removeError } = await supabase.storage.from(bucket).remove([attachment.path]);
+        if (!removeError) {
+          removed = true;
+          break;
         }
       }
+
+      if (!removed) {
+        console.warn('첨부파일 삭제 실패(모든 버킷 시도):', attachment.path);
+      }
+    }
+
+    // FK 제약으로 삭제가 막히지 않도록 자식 데이터를 먼저 삭제한다.
+    if (!missionTemplateDisabledRef.current && templateTableAvailable && missionTemplateTableConfirmedRef.current) {
+      const templateDelete = await supabase
+        .from('mission_templates')
+        .delete()
+        .eq('mission_id', missionId);
+
+      if (templateDelete.error) {
+        if (isMissingMissionTemplateTableError(templateDelete.error)) {
+          disableMissionTemplateFeature();
+        } else {
+          console.warn('미션 템플릿 삭제 오류:', templateDelete.error);
+        }
+      }
+    }
+
+    const logDelete = await supabase
+      .from('mission_logs')
+      .delete()
+      .eq('mission_id', missionId);
+
+    if (logDelete.error) {
+      console.error('미션 로그 삭제 오류:', logDelete.error);
+      alert('미션 삭제 실패: 연결된 로그 삭제 중 오류가 발생했습니다. ' + (logDelete.error.message || ''));
+      return;
     }
 
     const { error } = await supabase
@@ -907,11 +1788,20 @@ function App() {
 
     if (error) {
       console.error('미션 삭제 오류:', error);
-      alert('미션 삭제에 실패했습니다.');
+      alert('미션 삭제에 실패했습니다. ' + (error.message || ''));
       return;
     }
 
+    setMissionTemplates(prev => {
+      const next = { ...prev };
+      delete next[missionId];
+      return next;
+    });
+    if (selectedMissionId === missionId) {
+      setSelectedMissionId(null);
+    }
     loadMissions();
+    loadMissionLogs();
   };
 
   const onOpenAssignModal = (mission: Mission) => {
@@ -954,7 +1844,7 @@ function App() {
       const newMission: any = {
         id: nextId,
         title: assignModalMission.title,
-        description: assignModalMission.description,
+        description: assignModalMission.description_raw || assignModalMission.description,
         category: assignModalMission.category,
         subcategory: assignModalMission.subcategory,
         created_by: assignModalMission.created_by,
@@ -968,6 +1858,45 @@ function App() {
         alert('미션 복사 및 선수 지정 실패: ' + error.message);
         console.error('미션 할당 오류:', error);
         return;
+      }
+
+      if (!missionTemplateDisabledRef.current && templateTableAvailable) {
+        const templateLookup = await supabase
+          .from('mission_templates')
+          .select('version, status, schema_json')
+          .eq('mission_id', assignModalMission.id)
+          .eq('status', 'published')
+          .order('version', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (templateLookup.error) {
+          if (isMissingMissionTemplateTableError(templateLookup.error)) {
+            disableMissionTemplateFeature();
+          } else {
+            console.warn('복제 대상 템플릿 조회 실패:', templateLookup.error.message);
+          }
+        } else if (templateLookup.data) {
+          missionTemplateTableConfirmedRef.current = true;
+          const copiedTemplate = await supabase.from('mission_templates').insert([
+            {
+              mission_id: nextId,
+              version: 1,
+              status: 'published',
+              schema_json: templateLookup.data.schema_json,
+            }
+          ]);
+
+          if (copiedTemplate.error) {
+            if (isMissingMissionTemplateTableError(copiedTemplate.error)) {
+              disableMissionTemplateFeature();
+            } else {
+              console.warn('미션 템플릿 복제 실패:', copiedTemplate.error.message);
+            }
+          } else {
+            missionTemplateTableConfirmedRef.current = true;
+          }
+        }
       }
 
       alert('미정 미션을 새로운 선수 할당 미션으로 복사했습니다. 원본 미정 미션은 유지됩니다.');
@@ -1281,7 +2210,6 @@ function App() {
     );
   }
 
-  const isCoach = role === 'coach';
   const showVerificationPanelWithCoach = isCoach && currentCoach === 'woody62';
 
   const formatTimeDistance = (dateString?: string) => {
@@ -1475,6 +2403,7 @@ function App() {
               setCurrentPlayer(null);
               setLoginId('');
               setLoginPassword('');
+              resetMissionEditor();
             }}
           >
             로그아웃
@@ -1790,6 +2719,12 @@ function App() {
                           샷 일관성 도구 실행
                         </button>
                       )}
+                      <button
+                        style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#2563eb', color: '#fff' }}
+                        onClick={() => loadMissionIntoEditor(m)}
+                      >
+                        불러와 수정
+                      </button>
                       {(m.assigned_to === UNASSIGNED_CODE || m.assigned_to === UNASSIGNED_LABEL) ? (
                         <button
                           style={{ fontSize: '0.8rem', padding: '4px 8px' }}
@@ -1822,7 +2757,12 @@ function App() {
       )}
       {isCoach && (
         <div style={{ marginTop: 24, borderTop: '1px solid #eee', paddingTop: 12 }}>
-          <h3>미션 추가</h3>
+          <h3>{editingMissionId !== null ? `미션 수정 #${editingMissionId}` : '미션 추가'}</h3>
+          {editingMissionId !== null && (
+            <p style={{ marginTop: -2, marginBottom: 8, color: '#475569', fontSize: '0.88rem' }}>
+              저장소에서 불러온 미션을 수정 중입니다. 수정 저장 시 기존 미션이 업데이트됩니다.
+            </p>
+          )}
           <input
             style={{ width: '100%', marginBottom: 8, padding: 8 }}
             value={newMission.title}
@@ -1852,6 +2792,22 @@ function App() {
             </p>
           </div>
           <div style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+              <label style={{ fontWeight: 600 }}>미션 입력 템플릿</label>
+              <button
+                type="button"
+                onClick={() => setShowTemplateDesigner(true)}
+                style={{ fontSize: '0.8rem', padding: '4px 8px', background: '#334155' }}
+              >
+                템플릿 설계
+              </button>
+            </div>
+            <div style={{ fontSize: '0.82rem', color: '#475569', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '6px 8px' }}>
+              상태: {isTemplatePublishedForNewMission ? '배포 완료' : '미배포'} / 모드: {newTemplateMode === 'form' ? '필드형' : '시트형'} / {newTemplateMode === 'form' ? `필드 ${newMissionTemplateFields.length}개` : `${newGridRows}행 x ${newGridCols}열`}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 8 }}>
             <label>첨부 파일 (최대 3개):&nbsp;</label>
             <input
               type="file"
@@ -1874,13 +2830,53 @@ function App() {
               선택된 파일: {missionFiles.length > 0 ? missionFiles.map(f => f.name).join(', ') : '없음'}
             </div>
           </div>
-          <button onClick={handleAddMission}>미션 등록</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleAddMission}>{editingMissionId !== null ? '미션 수정 저장' : '미션 등록'}</button>
+            {editingMissionId !== null && (
+              <button type="button" className="grey-action" onClick={resetMissionEditor}>수정 취소</button>
+            )}
+          </div>
         </div>
       )}
 
       {isCoach && (
         <div style={{ marginTop: 24, borderTop: '1px solid #eee', paddingTop: 12 }}>
           <h3>코치 미션 로그 / 피드백 관리</h3>
+          <div style={{ marginBottom: 12, border: '1px solid #d8e4ff', borderRadius: 8, padding: 10, background: '#f9fcff' }}>
+            <strong>완료 로그 분석</strong>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              <div style={{ minWidth: 140, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
+                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>총 완료 제출</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{coachCompletedSummary.completedCount}건</div>
+              </div>
+              <div style={{ minWidth: 140, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
+                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>완료 선수 수</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{coachCompletedSummary.uniquePlayerCount}명</div>
+              </div>
+              <div style={{ minWidth: 220, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
+                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>최근 완료</div>
+                <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#0f172a' }}>
+                  {coachCompletedSummary.recentCompletedAt ? new Date(coachCompletedSummary.recentCompletedAt).toLocaleString() : '없음'}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: '0.82rem', color: '#475569', marginBottom: 4 }}>미션별 완료 상위 5개</div>
+              {coachCompletedSummary.missionRanking.length === 0 ? (
+                <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>완료 로그가 아직 없습니다.</div>
+              ) : (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {coachCompletedSummary.missionRanking.map(item => (
+                    <div key={item.missionId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', padding: '6px 8px' }}>
+                      <span style={{ fontSize: '0.88rem', color: '#1f2937' }}>{item.title}</span>
+                      <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#0f172a' }}>{item.count}건</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
           <div style={{ maxHeight: 440, overflowY: 'auto', paddingRight: 6 }}>
             {missionLogs.map(log => (
               <div key={log.id} style={{ border: '1px dashed #666', marginBottom: 8, padding: 8 }}>
@@ -1888,7 +2884,65 @@ function App() {
                 <div>미션 ID: {log.mission_id}</div>
                 <div>선수: {getPlayerLabel(log.player_id)}</div>
                 <div>상태: {log.status}</div>
-                <div>선수코멘트: {log.note}</div>
+                <div>선수코멘트: {getLogDisplayNote(log.note)}</div>
+                {(() => {
+                  const tableData = getTemplateTableRows(log.mission_id, log.note);
+                  if (!tableData) {
+                    return <div style={{ fontSize: '0.82rem', color: '#334155' }}>입력값 요약: {getTemplateValueSummary(log.mission_id, log.note)}</div>;
+                  }
+
+                  if (tableData.mode === 'grid') {
+                    return (
+                      <div style={{ marginTop: 6, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#fff' }}>
+                        <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>
+                          입력 템플릿 시트: {tableData.title}
+                        </div>
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr>
+                                <th style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>구분</th>
+                                {tableData.headers.map((header, idx) => (
+                                  <th key={`coach_header_${log.id}_${idx}`} style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>
+                                    {header}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {tableData.rows.map((row, rIdx) => (
+                                <tr key={`coach_row_${log.id}_${rIdx}`}>
+                                  <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>{row.label}</td>
+                                  {row.cells.map((cell, cIdx) => (
+                                    <td key={`coach_cell_${log.id}_${rIdx}_${cIdx}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px', textAlign: 'center' }}>
+                                      {cell || '-'}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div style={{ marginTop: 6, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#fff' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>입력 템플릿 항목</div>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <tbody>
+                          {tableData.rows.map((row, idx) => (
+                            <tr key={`coach_form_${log.id}_${idx}`}>
+                              <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', width: '35%', fontWeight: 600 }}>{row.label}</td>
+                              <td style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>{row.value || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
                 <div>코치: {log.coach_feedback || '없음'}</div>
                 <textarea
                   value={coachFeedback[log.id] || ''}
@@ -1901,6 +2955,295 @@ function App() {
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {isCoach && showTemplateDesigner && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ width: '92%', maxWidth: 620, maxHeight: '85vh', overflowY: 'auto', background: '#fff', borderRadius: 10, padding: 16 }}>
+            <h4 style={{ margin: '0 0 10px' }}>미션 템플릿 설계</h4>
+            <div style={{ marginBottom: 10, border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, background: '#f8fafc' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: 6 }}>카테고리 / 서브카테고리</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <select
+                  value={category || ''}
+                  onChange={e => {
+                    const nextCategory = e.target.value as Category;
+                    if (!nextCategory) {
+                      setCategory(null);
+                      setSubcategory(null);
+                      return;
+                    }
+                    setCategory(nextCategory);
+                    setSubcategory(subcategories[nextCategory][0]?.key || null);
+                  }}
+                >
+                  <option value="">카테고리 선택</option>
+                  <option value="technical">테크니컬 미션</option>
+                  <option value="game">실전 미션</option>
+                </select>
+
+                <select
+                  value={subcategory || ''}
+                  onChange={e => setSubcategory((e.target.value as SubCategory) || null)}
+                  disabled={!category}
+                >
+                  <option value="">서브카테고리 선택</option>
+                  {(category ? subcategories[category] : []).map(item => (
+                    <option key={item.key} value={item.key}>{item.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ marginTop: 6, fontSize: '0.8rem', color: '#64748b' }}>
+                현재 선택: {category ? (category === 'technical' ? '테크니컬' : '실전') : '없음'} / {subcategory ? (subcategories[category as Category]?.find(s => s.key === subcategory)?.label || subcategory) : '없음'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <button type="button" style={{ background: newTemplateMode === 'form' ? '#0f766e' : '#94a3b8' }} onClick={() => { setNewTemplateMode('form'); setIsTemplatePublishedForNewMission(false); }}>
+                필드형 템플릿
+              </button>
+              <button type="button" style={{ background: newTemplateMode === 'grid' ? '#0f766e' : '#94a3b8' }} onClick={() => { setNewTemplateMode('grid'); setIsTemplatePublishedForNewMission(false); }}>
+                엑셀 시트형 템플릿
+              </button>
+            </div>
+
+            {newTemplateMode === 'form' ? (
+              <>
+                {newMissionTemplateFields.length === 0 && (
+                  <p style={{ margin: '0 0 8px', color: '#64748b' }}>아직 필드가 없습니다. 아래에서 필드를 추가하세요.</p>
+                )}
+
+                {newMissionTemplateFields.map((field, idx) => (
+                  <div key={field.key} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 8, marginBottom: 8, background: '#f8fafc' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px 90px 70px', gap: 6 }}>
+                      <input
+                        value={field.label}
+                        placeholder="필드명"
+                        onChange={e => {
+                          const value = e.target.value;
+                          setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, label: value, key: f.key || `field_${idx + 1}` } : f));
+                        }}
+                      />
+                      <select
+                        value={field.type}
+                        onChange={e => setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, type: e.target.value as TemplateFieldType } : f))}
+                      >
+                        <option value="text">텍스트</option>
+                        <option value="number">숫자</option>
+                        <option value="select">선택</option>
+                      </select>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.85rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={field.required}
+                          onChange={e => setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, required: e.target.checked } : f))}
+                        />필수
+                      </label>
+                      <button
+                        type="button"
+                        style={{ fontSize: '0.75rem', padding: '4px 6px', background: '#ef4444' }}
+                        onClick={() => setNewMissionTemplateFields(prev => prev.filter((_, i) => i !== idx))}
+                      >
+                        삭제
+                      </button>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 6 }}>
+                      <input
+                        value={field.placeholder || ''}
+                        placeholder="입력 힌트 (placeholder)"
+                        onChange={e => {
+                          const value = e.target.value;
+                          setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, placeholder: value } : f));
+                        }}
+                      />
+                      <input
+                        value={field.helpText || ''}
+                        placeholder="도움말"
+                        onChange={e => {
+                          const value = e.target.value;
+                          setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, helpText: value } : f));
+                        }}
+                      />
+                    </div>
+                    {field.type === 'select' && (
+                      <input
+                        style={{ marginTop: 6 }}
+                        value={(field.options || []).join(',')}
+                        placeholder="선택지 (콤마로 구분)"
+                        onChange={e => {
+                          const options = e.target.value.split(',').map(v => v.trim()).filter(Boolean);
+                          setNewMissionTemplateFields(prev => prev.map((f, i) => i === idx ? { ...f, options } : f));
+                        }}
+                      />
+                    )}
+                  </div>
+                ))}
+
+                {newMissionTemplateFields.length > 0 && (
+                  <div style={{ marginTop: 10, border: '1px solid #dbe4f0', borderRadius: 8, padding: 10, background: '#ffffff' }}>
+                    <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#334155', marginBottom: 6 }}>선수 입력 화면 미리보기</div>
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      {newMissionTemplateFields.map(field => (
+                        <div key={`preview_${field.key}`} style={{ border: '1px solid #eef2f7', borderRadius: 6, padding: 8, background: '#f8fafc' }}>
+                          <label style={{ display: 'block', marginBottom: 4, fontSize: '0.83rem', color: '#1f2937', fontWeight: 600 }}>
+                            {field.label || '(필드명 미입력)'} {field.required ? '*' : ''}
+                          </label>
+                          {field.type === 'select' ? (
+                            <select disabled style={{ width: '100%', opacity: 0.9 }}>
+                              <option>{field.placeholder || '선택하세요'}</option>
+                              {(field.options || []).map(opt => (
+                                <option key={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type={field.type === 'number' ? 'number' : 'text'}
+                              disabled
+                              placeholder={field.placeholder || '값을 입력하세요'}
+                              style={{ width: '100%', opacity: 0.9 }}
+                            />
+                          )}
+                          {field.helpText ? (
+                            <div style={{ marginTop: 4, fontSize: '0.78rem', color: '#64748b' }}>{field.helpText}</div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ border: '1px solid #dbe4f0', borderRadius: 8, padding: 10, background: '#ffffff', marginBottom: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 110px 110px 130px', gap: 6, marginBottom: 8 }}>
+                  <input value={newGridTitle} placeholder="시트 제목" onChange={e => { setNewGridTitle(e.target.value); setIsTemplatePublishedForNewMission(false); }} />
+                  <input type="number" min={1} max={20} value={newGridRows} onChange={e => { setNewGridRows(Math.max(1, Math.min(20, Number(e.target.value) || 1))); setIsTemplatePublishedForNewMission(false); }} />
+                  <input type="number" min={1} max={10} value={newGridCols} onChange={e => { setNewGridCols(Math.max(1, Math.min(10, Number(e.target.value) || 1))); setIsTemplatePublishedForNewMission(false); }} />
+                  <input type="number" min={0} value={newGridSuccessThreshold} placeholder="성공 기준값" onChange={e => { setNewGridSuccessThreshold(Number(e.target.value) || 0); setIsTemplatePublishedForNewMission(false); }} />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#475569', marginBottom: 4 }}>행 제목</div>
+                    {Array.from({ length: newGridRows }).map((_, idx) => (
+                      <input key={`rh_${idx}`} style={{ marginBottom: 4 }} value={newGridRowHeaders[idx] || ''} onChange={e => {
+                        const value = e.target.value;
+                        setNewGridRowHeaders(prev => {
+                          const next = [...prev];
+                          next[idx] = value;
+                          return next;
+                        });
+                        setIsTemplatePublishedForNewMission(false);
+                      }} placeholder={`행 ${idx + 1}`} />
+                    ))}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#475569', marginBottom: 4 }}>열 제목</div>
+                    {Array.from({ length: newGridCols }).map((_, idx) => (
+                      <input key={`ch_${idx}`} style={{ marginBottom: 4 }} value={newGridColHeaders[idx] || ''} onChange={e => {
+                        const value = e.target.value;
+                        setNewGridColHeaders(prev => {
+                          const next = [...prev];
+                          next[idx] = value;
+                          return next;
+                        });
+                        setIsTemplatePublishedForNewMission(false);
+                      }} placeholder={`열 ${idx + 1}`} />
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#334155', marginBottom: 6 }}>선수 입력 시트 미리보기 (빈칸만 입력)</div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ borderCollapse: 'collapse', minWidth: 420, width: '100%' }}>
+                      <thead>
+                        <tr>
+                          <th style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>구분</th>
+                          {Array.from({ length: newGridCols }).map((_, c) => (
+                            <th key={`ph_${c}`} style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>
+                              {newGridColHeaders[c] || `열 ${c + 1}`}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Array.from({ length: newGridRows }).map((_, r) => (
+                          <tr key={`pr_${r}`}>
+                            <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>
+                              {newGridRowHeaders[r] || `행 ${r + 1}`}
+                            </td>
+                            {Array.from({ length: newGridCols }).map((_, c) => (
+                              <td key={`pc_${r}_${c}`} style={{ border: '1px solid #dbe4f0', padding: 4 }}>
+                                <input disabled placeholder="입력" style={{ width: '100%', background: '#fff' }} />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                style={{ background: '#0f766e' }}
+                onClick={() => {
+                  if (newTemplateMode !== 'form') {
+                    alert('필드 추가는 필드형 템플릿 모드에서 사용하세요.');
+                    return;
+                  }
+                  setNewMissionTemplateFields(prev => [
+                    ...prev,
+                    {
+                      key: `field_${Date.now()}`,
+                      label: '',
+                      type: 'text',
+                      required: false,
+                      options: [],
+                      placeholder: '',
+                      helpText: '',
+                    }
+                  ]);
+                  setIsTemplatePublishedForNewMission(false);
+                }}
+              >
+                필드 추가
+              </button>
+              <button
+                type="button"
+                style={{ background: '#16a34a' }}
+                onClick={() => {
+                  if (newTemplateMode === 'form') {
+                    if (newMissionTemplateFields.length === 0) {
+                      alert('최소 1개 이상의 필드를 추가하세요.');
+                      return;
+                    }
+                    if (newMissionTemplateFields.some(f => !f.label.trim())) {
+                      alert('모든 필드명(label)을 입력하세요.');
+                      return;
+                    }
+                  } else {
+                    if (newGridRows < 1 || newGridCols < 1) {
+                      alert('행/열 수는 1 이상이어야 합니다.');
+                      return;
+                    }
+                    if (newGridRowHeaders.some(v => !v || !v.trim()) || newGridColHeaders.some(v => !v || !v.trim())) {
+                      alert('시트형 템플릿은 모든 행/열 제목을 입력해야 합니다.');
+                      return;
+                    }
+                  }
+                  setIsTemplatePublishedForNewMission(true);
+                  setShowTemplateDesigner(false);
+                }}
+              >
+                템플릿 배포 완료
+              </button>
+              <button type="button" className="grey-action" onClick={() => setShowTemplateDesigner(false)}>닫기</button>
+            </div>
           </div>
         </div>
       )}
@@ -1928,11 +3271,14 @@ function App() {
               available = available.filter(m => m.category === category && m.subcategory === subcategory);
             }
 
-            const missionStatusMap = new Map<number, 'pending' | 'completed'>(missionLogs.map(log => [log.mission_id, log.status]));
+            if (showMineOnly && currentPlayer) {
+              available = available.filter(m => m.assigned_to === currentPlayer);
+            }
+
             if (missionFilter === 'pending') {
-              available = available.filter(m => missionStatusMap.get(m.id) === 'pending');
+              available = available.filter(m => latestMissionStatusById[m.id] === 'pending');
             } else if (missionFilter === 'completed') {
-              available = available.filter(m => missionStatusMap.get(m.id) === 'completed');
+              available = available.filter(m => latestMissionStatusById[m.id] === 'completed');
             }
 
             available = available.sort((a, b) => new Date(b.inserted_at || '').getTime() - new Date(a.inserted_at || '').getTime());
@@ -1944,7 +3290,7 @@ function App() {
             const selectedMission = missionsForList.find(m => m.id === selectedPlayerMissionId);
 
             return (
-              <>
+              <div>
                 <div className="content-section" style={{ marginBottom: 12 }}>
                   <strong>내 할당 미션</strong>
                   <div style={{ marginTop: 8, color: '#444' }}>전체 할당 미션: {assignedCount}개</div>
@@ -2012,6 +3358,203 @@ function App() {
 
                 {selectedMission ? (
                   <div style={{ border: '1px solid #d0e4ff', borderRadius: 8, padding: 12, background: '#f9fcff', marginBottom: 16 }}>
+                    {(() => {
+                      const isSubmitted = latestMissionStatusById[selectedMission.id] === 'completed';
+                      const selectedFiles = playerMissionFiles[selectedMission.id] || [];
+                      const draftFiles = playerDraftAttachments[selectedMission.id] || [];
+                      const missionTemplate = missionTemplates[selectedMission.id];
+                      const gridTemplate = missionTemplate?.schema_json?.grid;
+                      const currentTemplateValues = playerTemplateValues[selectedMission.id] || {};
+
+                      return (
+                        <div style={{ marginBottom: 10, padding: 10, border: '1px solid #d8e4ff', borderRadius: 8, background: '#ffffff' }}>
+                          <strong>미션 결과 입력</strong>
+                          <textarea
+                            rows={4}
+                            style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 6, border: '1px solid #d9dee8', background: isSubmitted ? '#f3f4f6' : '#fff', color: '#1f2937' }}
+                            value={playerMissionNotes[selectedMission.id] || ''}
+                            onChange={e => setPlayerMissionNotes(prev => ({ ...prev, [selectedMission.id]: e.target.value }))}
+                            placeholder="미션 수행 결과를 입력하세요. (자동 임시저장)"
+                            disabled={isSubmitted}
+                          />
+
+                          {(missionTemplate?.schema_json?.mode || 'form') === 'grid' && gridTemplate ? (
+                            <div style={{ marginTop: 8, border: '1px solid #e2e8f0', borderRadius: 6, padding: 8, background: '#f8fafc' }}>
+                              <div style={{ fontSize: '0.83rem', color: '#475569', marginBottom: 6 }}>
+                                {gridTemplate.title || '템플릿 입력 시트'}
+                              </div>
+                              <div style={{ overflowX: 'auto' }}>
+                                <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse' }}>
+                                  <thead>
+                                    <tr>
+                                      <th style={{ border: '1px solid #dbe1ea', background: '#f1f5f9', padding: '4px 6px' }}>구분</th>
+                                      {Array.from({ length: gridTemplate.colCount }).map((_, c) => (
+                                        <th key={`gc_${c}`} style={{ border: '1px solid #dbe1ea', background: '#f1f5f9', padding: '4px 6px' }}>
+                                          {gridTemplate.colHeaders[c] || `열 ${c + 1}`}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {Array.from({ length: gridTemplate.rowCount }).map((_, r) => (
+                                      <tr key={`gr_${r}`}>
+                                        <td style={{ border: '1px solid #dbe1ea', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>
+                                          {gridTemplate.rowHeaders[r] || `행 ${r + 1}`}
+                                        </td>
+                                        {Array.from({ length: gridTemplate.colCount }).map((_, c) => {
+                                          const cellKey = `cell_r${r}_c${c}`;
+                                          return (
+                                            <td key={cellKey} style={{ border: '1px solid #dbe1ea', padding: 4 }}>
+                                              <input
+                                                disabled={isSubmitted}
+                                                value={currentTemplateValues[cellKey] || ''}
+                                                placeholder="입력"
+                                                onChange={e => setPlayerTemplateValues(prev => ({
+                                                  ...prev,
+                                                  [selectedMission.id]: {
+                                                    ...(prev[selectedMission.id] || {}),
+                                                    [cellKey]: e.target.value,
+                                                  },
+                                                }))}
+                                              />
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              <div style={{ marginTop: 8, borderTop: '1px dashed #cbd5e1', paddingTop: 8 }}>
+                                <div style={{ fontSize: '0.8rem', color: '#475569', marginBottom: 4 }}>자동 계산 (합계/평균/표준편차/성공률)</div>
+                                {Array.from({ length: gridTemplate.colCount }).map((_, c) => {
+                                  const colValues = Array.from({ length: gridTemplate.rowCount })
+                                    .map((__, r) => Number(currentTemplateValues[`cell_r${r}_c${c}`]))
+                                    .filter(v => Number.isFinite(v));
+
+                                  const sum = colValues.reduce((acc, v) => acc + v, 0);
+                                  const avg = colValues.length ? sum / colValues.length : 0;
+                                  const stddev = colValues.length > 1
+                                    ? Math.sqrt(colValues.reduce((acc, v) => acc + (v - avg) * (v - avg), 0) / (colValues.length - 1))
+                                    : 0;
+                                  const successCount = colValues.filter(v => v >= (gridTemplate.successThreshold ?? 1)).length;
+                                  const successRate = colValues.length ? (successCount / colValues.length) * 100 : 0;
+
+                                  return (
+                                    <div key={`calc_${c}`} style={{ fontSize: '0.78rem', color: '#334155', marginBottom: 2 }}>
+                                      {gridTemplate.colHeaders[c] || `열 ${c + 1}`}: 합계 {sum.toFixed(2)} / 평균 {avg.toFixed(2)} / 표준편차 {stddev.toFixed(2)} / 성공률 {successRate.toFixed(1)}%
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ) : missionTemplate?.schema_json?.fields?.length ? (
+                            <div style={{ marginTop: 8, border: '1px solid #e2e8f0', borderRadius: 6, padding: 8, background: '#f8fafc' }}>
+                              <div style={{ fontSize: '0.83rem', color: '#475569', marginBottom: 6 }}>템플릿 입력 항목</div>
+                              {missionTemplate.schema_json.fields.map(field => (
+                                <div key={field.key} style={{ marginBottom: 6 }}>
+                                  <label style={{ display: 'block', fontSize: '0.82rem', color: '#334155', marginBottom: 2 }}>
+                                    {field.label} {field.required ? '*' : ''}
+                                  </label>
+                                  {field.type === 'select' ? (
+                                    <select
+                                      disabled={isSubmitted}
+                                      value={currentTemplateValues[field.key] || ''}
+                                      onChange={e => setPlayerTemplateValues(prev => ({
+                                        ...prev,
+                                        [selectedMission.id]: {
+                                          ...(prev[selectedMission.id] || {}),
+                                          [field.key]: e.target.value,
+                                        },
+                                      }))}
+                                    >
+                                      <option value="">{field.placeholder || '선택'}</option>
+                                      {(field.options || []).map(option => (
+                                        <option key={option} value={option}>{option}</option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <input
+                                      type={field.type === 'number' ? 'number' : 'text'}
+                                      disabled={isSubmitted}
+                                      placeholder={field.placeholder || '입력'}
+                                      value={currentTemplateValues[field.key] || ''}
+                                      onChange={e => setPlayerTemplateValues(prev => ({
+                                        ...prev,
+                                        [selectedMission.id]: {
+                                          ...(prev[selectedMission.id] || {}),
+                                          [field.key]: e.target.value,
+                                        },
+                                      }))}
+                                    />
+                                  )}
+                                  {field.helpText ? (
+                                    <div style={{ marginTop: 2, fontSize: '0.76rem', color: '#64748b' }}>{field.helpText}</div>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+
+                          <div style={{ marginTop: 8 }}>
+                            <label style={{ display: 'block', fontSize: '0.85rem', color: '#334155', marginBottom: 4 }}>
+                              결과 첨부 파일 (최대 3개)
+                            </label>
+                            <input
+                              type="file"
+                              accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.bmp,.gif"
+                              multiple
+                              disabled={isSubmitted}
+                              onChange={e => {
+                                if (isSubmitted || !e.target.files) return;
+                                const incoming = Array.from(e.target.files);
+                                setPlayerMissionFiles(prev => {
+                                  const next = [...(prev[selectedMission.id] || []), ...incoming];
+                                  if (next.length > 3) {
+                                    alert('파일은 최대 3개까지 첨부할 수 있습니다.');
+                                    return prev;
+                                  }
+                                  return { ...prev, [selectedMission.id]: next };
+                                });
+                              }}
+                            />
+                            <div style={{ marginTop: 6, fontSize: '0.82rem', color: '#1f2937', background: '#f8fafc', border: '1px solid #dbe1ea', borderRadius: 6, padding: '6px 8px' }}>
+                              선택된 파일: {selectedFiles.length > 0 ? selectedFiles.map(f => f.name).join(', ') : '없음'}
+                            </div>
+                            {draftFiles.length > 0 && (
+                              <div style={{ marginTop: 6, fontSize: '0.82rem', color: '#334155' }}>
+                                임시 저장 첨부: {draftFiles.map(f => f.name).join(', ')}
+                              </div>
+                            )}
+                          </div>
+
+                          <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              disabled={isSubmitted}
+                              onClick={() => saveMissionDraft(selectedMission.id, { includeFiles: false, silent: false })}
+                              style={{ fontSize: '0.85rem', padding: '6px 10px', background: '#64748b' }}
+                            >
+                              임시 저장
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSubmitted}
+                              onClick={() => handleCompleteMission(selectedMission.id)}
+                              style={{ fontSize: '0.85rem', padding: '6px 10px', background: '#16a34a' }}
+                            >
+                              미션 완료 제출
+                            </button>
+                          </div>
+
+                          <div style={{ marginTop: 6, fontSize: '0.8rem', color: isSubmitted ? '#166534' : '#475569' }}>
+                            상태: {isSubmitted ? '완료 제출됨 (읽기 전용)' : (draftSaveStatus[selectedMission.id] || '입력 중')}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     <h4 style={{ margin: '0 0 8px 0' }}>선택된 미션 상세보기</h4>
                     <h5 style={{ margin: '0 0 6px 0' }}>{selectedMission.title}</h5>
                     <p style={{ margin: '0 0 10px 0', color: '#333' }}>{selectedMission.description}</p>
@@ -2030,20 +3573,28 @@ function App() {
                     <div style={{ fontSize: '0.9rem', color: '#555', marginBottom: 8 }}>
                       ID: #{selectedMission.id} · 등록: {selectedMission.inserted_at ? formatTimeDistance(selectedMission.inserted_at) : '-'}
                     </div>
+
                     <div style={{ marginTop: 8, padding: 10, border: '1px solid #ccc', borderRadius: 6, background: '#fff' }}>
-                      <strong>코치 피드백</strong>
+                      <strong>미션 대화/피드백 이력</strong>
                       <div style={{ marginTop: 6 }}>
                         {(() => {
-                          const missionLogsForSelected = missionLogs.filter(l => l.mission_id === selectedMission.id && l.player_id === currentPlayer);
+                          const missionLogsForSelected = missionLogs
+                            .filter(l => l.mission_id === selectedMission.id && l.player_id === currentPlayer)
+                            .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
                           if (missionLogsForSelected.length === 0) {
-                            return <p style={{ margin: 0, color: '#888' }}>코치 피드백이 아직 등록되지 않았습니다. 아래 '나의 미션 로그'에서 해당 미션별 기록을 확인하세요.</p>;
+                            return <p style={{ margin: 0, color: '#888' }}>이 미션에 대한 대화/피드백 이력이 없습니다.</p>;
                           }
+
                           return (
                             <>
                               {missionLogsForSelected.map(log => (
                                 <div key={log.id} style={{ marginBottom: 8, padding: 8, background: '#f5f9ff', borderRadius: 6 }}>
-                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', fontWeight: 600, color: '#1a237e' }}>상태: {log.status}</p>
-                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', color: '#004d40' }}><strong>선수 코멘트:</strong> {log.note || '없음'}</p>
+                                  <p style={{ margin: '3px 0', fontSize: '0.82rem', color: '#64748b' }}>
+                                    {new Date(log.created_at).toLocaleString()} · 상태: {log.status}
+                                  </p>
+                                  <p style={{ margin: '3px 0', fontSize: '0.9rem', color: '#004d40' }}><strong>선수 코멘트:</strong> {getLogDisplayNote(log.note)}</p>
+                                  <p style={{ margin: '3px 0', fontSize: '0.85rem', color: '#1f2937' }}><strong>입력값 요약:</strong> {getTemplateValueSummary(log.mission_id, log.note)}</p>
                                   <p style={{ margin: '3px 0', fontSize: '0.9rem', color: '#b71c1c' }}><strong>코치 코멘트:</strong> {log.coach_feedback || '미등록'}</p>
                                 </div>
                               ))}
@@ -2051,71 +3602,31 @@ function App() {
                           );
                         })()}
                       </div>
-                    </div>
-                    <div style={{ marginTop: 8, padding: 10, border: '1px solid #ccc', borderRadius: 6, background: '#fff' }}>
-                      <strong>미션에 코멘트 보내기</strong>
-                      <textarea
-                        rows={3}
-                        style={{ width: '100%', marginTop: 6, padding: 8, borderRadius: 6, border: '1px solid #ddd' }}
-                        value={missionReply[selectedMission.id] || ''}
-                        onChange={e => setMissionReply(prev => ({ ...prev, [selectedMission.id]: e.target.value }))}
-                        placeholder="선택된 미션에 대한 의견을 입력하세요"
-                      />
-                      <button
-                        style={{ marginTop: 8, padding: '6px 10px', fontSize: '0.9rem' }}
-                        onClick={() => handleMissionChatSend(selectedMission.id)}
-                      >
-                        전송
-                      </button>
+
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px dashed #cbd5e1' }}>
+                        <strong>코치에게 메시지 보내기</strong>
+                        <textarea
+                          rows={3}
+                          style={{ width: '100%', marginTop: 6, padding: 8, borderRadius: 6, border: '1px solid #ddd' }}
+                          value={missionReply[selectedMission.id] || ''}
+                          onChange={e => setMissionReply(prev => ({ ...prev, [selectedMission.id]: e.target.value }))}
+                          placeholder="이 미션에 대한 의견을 입력하세요"
+                        />
+                        <button
+                          style={{ marginTop: 8, padding: '6px 10px', fontSize: '0.9rem' }}
+                          onClick={() => handleMissionChatSend(selectedMission.id)}
+                        >
+                          전송
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
                   <div style={{ marginBottom: 16, color: '#666' }}>미션을 선택하면 상세 내용을 표시합니다.</div>
                 )}
-              </>
+              </div>
             );
           })()}
-
-          <div style={{ marginTop: 24 }}>
-            <h3>나의 미션 로그</h3>
-            {Object.keys(missionLogsByMission).length === 0 ? (
-              <p style={{ color: '#666' }}>현재 등록된 미션 로그가 없습니다.</p>
-            ) : (
-              <div style={{ maxHeight: 300, overflowY: 'auto', paddingRight: 6 }}>
-                {Object.entries(missionLogsByMission as Record<string, MissionLog[]>)
-                  .sort((a, b) => Number(b[0]) - Number(a[0]))
-                  .map(([missionIdStr, logs]) => {
-                    const missionId = Number(missionIdStr);
-                    const missionInfo = missions.find(m => m.id === missionId);
-                    return (
-                      <div key={missionId} style={{ border: '1px solid #d5d5d5', marginBottom: 10, borderRadius: 8, padding: 10, background: '#f9f9f9' }}>
-                        <h4 style={{ margin: '0 0 6px 0' }}>
-                          미션 #{missionId} {missionInfo ? `- ${missionInfo.title}` : ''}
-                        </h4>
-                        {logs
-                          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-                          .map(log => (
-                            <div key={log.id} style={{ border: '1px dashed #999', marginBottom: 8, padding: 8, background: '#fff', borderRadius: 6 }}>
-                              <div style={{ fontSize: '0.85rem', color: '#666' }}>작성일: {new Date(log.created_at).toLocaleString()}</div>
-                              <div style={{ margin: '2px 0', fontSize: '0.9rem', color: '#004d40' }}><strong>선수코멘트:</strong> {log.note || '없음'}</div>
-                              <div style={{ margin: '2px 0', fontSize: '0.9rem', color: '#b71c1c' }}><strong>코치:</strong> {log.coach_feedback || '미등록'}</div>
-                            </div>
-                          ))}
-                        <div style={{ marginTop: 8 }}>
-                          <textarea
-                            value={missionReply[missionId] || ''}
-                            onChange={e => setMissionReply(prev => ({ ...prev, [missionId]: e.target.value }))}
-                            placeholder="이 미션에 대한 코치에게 보낼 메시지"
-                            style={{ width: '100%', minHeight: 48, marginBottom: 6 }}
-                          />
-                          <button onClick={() => handleMissionChatSend(missionId)}>미션 코멘트 전송</button>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
         </div>
       )}
 
