@@ -39,7 +39,7 @@ const subcategories: Record<Category, { key: SubCategory; label: string }[]> = {
     { key: 'shot_consistency', label: '샷 일관성 미션' }
   ],
   game: [
-    { key: '18hole', label: '18홀 가상 라운드' },
+    { key: '18hole', label: '파3 게임 미션' },
     { key: 'chipside', label: '그린사이드 칩샷' },
     { key: 'approach', label: '100야드 이내 어프로치' },
     { key: 'troubleshot', label: '트러블 샷' },
@@ -89,6 +89,7 @@ type GridTemplateConfig = {
   colCount: number;
   rowHeaders: string[];
   colHeaders: string[];
+  colFormulas?: string[];
   successThreshold: number;
 };
 
@@ -198,6 +199,7 @@ function App() {
   const [newGridCols, setNewGridCols] = useState(4);
   const [newGridRowHeaders, setNewGridRowHeaders] = useState<string[]>([]);
   const [newGridColHeaders, setNewGridColHeaders] = useState<string[]>([]);
+  const [newGridColFormulas, setNewGridColFormulas] = useState<string[]>([]);
   const [newGridSuccessThreshold, setNewGridSuccessThreshold] = useState(1);
   const [isTemplatePublishedForNewMission, setIsTemplatePublishedForNewMission] = useState(false);
   const [showTemplateDesigner, setShowTemplateDesigner] = useState(false);
@@ -352,10 +354,57 @@ function App() {
     return { noteText: rawNote, templateValues: {}, templateSchema: null };
   };
 
+  const normalizeGridFormula = (formula: string) => {
+    return formula.trim().replace(/^[=\s]+/, '').replace(/\s+/g, '');
+  };
+
+  const evaluateGridFormula = (formula: string, rowValues: string[]) => {
+    const normalized = normalizeGridFormula(formula);
+    if (!normalized) return '';
+
+    const expression = normalized.replace(/열(\d+)/gi, (_match, digits) => {
+      const index = Number(digits) - 1;
+      if (!Number.isFinite(index) || index < 0 || index >= rowValues.length) return '0';
+      const value = Number(rowValues[index]);
+      return Number.isFinite(value) ? String(value) : '0';
+    });
+
+    if (/[^0-9+\-*/().,\s]/.test(expression)) return '';
+
+    try {
+      const result = Function(`"use strict"; return (${expression});`)();
+      return Number.isFinite(result) ? String(result) : '';
+    } catch {
+      return '';
+    }
+  };
+
+  const applyGridFormulasToValues = (values: Record<string, string>, grid: GridTemplateConfig) => {
+    if (!grid.colFormulas || grid.colFormulas.length === 0) return values;
+
+    const normalizedValues = { ...values };
+
+    for (let r = 0; r < grid.rowCount; r++) {
+      const rowValues = Array.from({ length: grid.colCount }).map((__, c) => normalizedValues[`cell_r${r}_c${c}`] || '');
+      for (let c = 0; c < grid.colCount; c++) {
+        const formula = grid.colFormulas[c] || '';
+        if (!formula.trim()) continue;
+        const computed = evaluateGridFormula(formula, rowValues);
+        normalizedValues[`cell_r${r}_c${c}`] = computed;
+      }
+    }
+
+    return normalizedValues;
+  };
+
   const buildMissionDraftPayload = (missionId: number, noteText: string): string => {
+    const rawTemplateValues = playerTemplateValues[missionId] || {};
+    const gridTemplate = missionTemplates[missionId]?.schema_json?.grid;
+    const templateValues = gridTemplate ? applyGridFormulasToValues(rawTemplateValues, gridTemplate) : rawTemplateValues;
+
     const payload: MissionDraftPayload = {
       noteText: noteText || '',
-      templateValues: playerTemplateValues[missionId] || {},
+      templateValues,
       templateSchema: missionTemplates[missionId]?.schema_json || null,
     };
     return JSON.stringify(payload);
@@ -1004,6 +1053,11 @@ function App() {
       while (next.length < newGridCols) next.push(`항목 ${next.length + 1}`);
       return next.slice(0, newGridCols);
     });
+    setNewGridColFormulas(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push('');
+      return next.slice(0, newGridCols);
+    });
   }, [newGridCols]);
 
   const handleLogin = async () => {
@@ -1096,6 +1150,7 @@ function App() {
         setNewGridCols(schema.grid.colCount || 4);
         setNewGridRowHeaders(schema.grid.rowHeaders || []);
         setNewGridColHeaders(schema.grid.colHeaders || []);
+        setNewGridColFormulas(schema.grid.colFormulas || []);
         setNewGridSuccessThreshold(schema.grid.successThreshold || 1);
         setNewMissionTemplateFields([]);
       } else {
@@ -1159,6 +1214,7 @@ function App() {
                 colCount: newGridCols,
                 rowHeaders: newGridRowHeaders,
                 colHeaders: newGridColHeaders,
+                colFormulas: newGridColFormulas,
                 successThreshold: newGridSuccessThreshold,
               },
             }
@@ -1500,8 +1556,11 @@ function App() {
 
     const note = playerMissionNotes[missionId]?.trim() || '';
     const template = missionTemplates[missionId];
-    const templateValues = playerTemplateValues[missionId] || {};
+    const rawTemplateValues = playerTemplateValues[missionId] || {};
     const templateMode = template?.schema_json?.mode || 'form';
+    const templateValues = templateMode === 'grid' && template?.schema_json?.grid
+      ? applyGridFormulasToValues(rawTemplateValues, template.schema_json.grid)
+      : rawTemplateValues;
     const requiredFields = template?.schema_json?.fields?.filter(field => field.required) || [];
     const missingRequired = requiredFields.filter(field => !(templateValues[field.key] || '').toString().trim());
 
@@ -1751,13 +1810,21 @@ function App() {
 
     const mission = missions.find(m => m.id === missionId);
 
-    const { data: logRows, error: logRowsError } = await supabase
-      .from('mission_logs')
-      .select('attachments')
-      .eq('mission_id', missionId);
+    let logRows: any[] = [];
+    if (missionLogAttachmentsAvailableRef.current !== false) {
+      const { data, error } = await supabase
+        .from('mission_logs')
+        .select('attachments')
+        .eq('mission_id', missionId);
 
-    if (logRowsError) {
-      console.warn('미션 로그 첨부 조회 실패:', logRowsError.message);
+      if (error) {
+        console.warn('미션 로그 첨부 조회 실패:', error.message);
+        if (isMissingMissionLogAttachmentsColumnError(error)) {
+          missionLogAttachmentsAvailableRef.current = false;
+        }
+      } else {
+        logRows = data || [];
+      }
     }
 
     const attachmentMap = new Map<string, AttachmentMeta>();
@@ -2200,51 +2267,64 @@ function App() {
           <div className="subtitle">ver26.3.1</div>
         </div>
         <p>코치 / 선수로 로그인해 주세요.</p>
-        <div style={{ margin: '12px 0' }}>
+        <form style={{ margin: '12px 0' }} onSubmit={e => { e.preventDefault(); handleLogin(); }}>
           <input
+            name="loginId"
             style={{ width: 'calc(100% - 12px)', padding: 8, marginBottom: 8 }}
             placeholder="아이디(코치코드 또는 선수아이디)"
             value={loginId}
             onChange={e => setLoginId(e.target.value)}
+            inputMode="text"
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
           />
           <input
+            name="loginPassword"
             type="password"
             style={{ width: 'calc(100% - 12px)', padding: 8 }}
             placeholder="비밀번호"
             value={loginPassword}
             onChange={e => setLoginPassword(e.target.value)}
+            autoComplete="current-password"
           />
-          <button style={{ display: 'block', marginTop: 8 }} onClick={handleLogin}>
+          <button type="submit" style={{ display: 'block', marginTop: 8 }}>
             로그인
           </button>
-        </div>
+        </form>
 
-        <div style={{ marginTop: 20, padding: 12, border: '1px solid #ddd', borderRadius: 4 }}>
+        <form style={{ marginTop: 20, padding: 12, border: '1px solid #ddd', borderRadius: 4 }} onSubmit={e => { e.preventDefault(); handleRequestPlayerAccount(); }}>
           <h4>선수 계정 신청</h4>
           <input
+            name="requestedUsername"
             style={{ width: '100%', marginBottom: 8, padding: 8 }}
             placeholder="신청할 아이디"
             value={requestedUsername}
             onChange={e => setRequestedUsername(e.target.value)}
+            autoComplete="username"
           />
           <input
+            name="requestedDisplayName"
             style={{ width: '100%', marginBottom: 8, padding: 8 }}
             placeholder="선수 이름 (예: 홍길동)"
             value={requestedDisplayName}
             onChange={e => setRequestedDisplayName(e.target.value)}
+            autoComplete="name"
           />
           <input
+            name="requestedPassword"
             type="password"
             style={{ width: '100%', marginBottom: 8, padding: 8 }}
             placeholder="신청할 비밀번호"
             value={requestedPassword}
             onChange={e => setRequestedPassword(e.target.value)}
+            autoComplete="new-password"
           />
-          <button onClick={handleRequestPlayerAccount}>계정 신청</button>
+          <button type="submit">계정 신청</button>
           <p style={{ marginTop: 8, color: '#555', fontSize: 14 }}>
             신청 후 코치 인증을 받으면 사용 가능합니다.
           </p>
-        </div>
+        </form>
 
       </div>
     );
@@ -3193,6 +3273,28 @@ function App() {
                   </div>
                 </div>
 
+                <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+                  <div style={{ fontSize: '0.8rem', color: '#475569', marginBottom: 4 }}>열 수식</div>
+                  {Array.from({ length: newGridCols }).map((_, idx) => (
+                    <input
+                      key={`cf_${idx}`}
+                      style={{ marginBottom: 4 }}
+                      value={newGridColFormulas[idx] || ''}
+                      placeholder={`열 ${idx + 1} 수식 (예: 열1*열2)`}
+                      onChange={e => {
+                        const value = e.target.value;
+                        setNewGridColFormulas(prev => {
+                          const next = [...prev];
+                          next[idx] = value;
+                          return next;
+                        });
+                        setIsTemplatePublishedForNewMission(false);
+                      }}
+                    />
+                  ))}
+                  <div style={{ fontSize: '0.76rem', color: '#64748b' }}>같은 행의 다른 열 값을 참조하려면 열번호를 사용하세요. 예: 열1*열2</div>
+                </div>
+
                 <div style={{ marginTop: 10 }}>
                   <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#334155', marginBottom: 6 }}>선수 입력 시트 미리보기 (빈칸만 입력)</div>
                   <div style={{ overflowX: 'auto' }}>
@@ -3404,7 +3506,10 @@ function App() {
                       const draftFiles = playerDraftAttachments[selectedMission.id] || [];
                       const missionTemplate = missionTemplates[selectedMission.id];
                       const gridTemplate = missionTemplate?.schema_json?.grid;
-                      const currentTemplateValues = playerTemplateValues[selectedMission.id] || {};
+                      const currentTemplateValuesRaw = playerTemplateValues[selectedMission.id] || {};
+                      const currentTemplateValues = gridTemplate
+                        ? applyGridFormulasToValues(currentTemplateValuesRaw, gridTemplate)
+                        : currentTemplateValuesRaw;
 
                       return (
                         <div style={{ marginBottom: 10, padding: 10, border: '1px solid #d8e4ff', borderRadius: 8, background: '#ffffff' }}>
@@ -3443,19 +3548,24 @@ function App() {
                                         </td>
                                         {Array.from({ length: gridTemplate.colCount }).map((_, c) => {
                                           const cellKey = `cell_r${r}_c${c}`;
+                                          const formula = gridTemplate.colFormulas?.[c] || '';
+                                          const isFormulaCell = !!formula.trim();
                                           return (
                                             <td key={cellKey} style={{ border: '1px solid #dbe1ea', padding: 4 }}>
                                               <input
-                                                disabled={isSubmitted}
+                                                disabled={isSubmitted || isFormulaCell}
                                                 value={currentTemplateValues[cellKey] || ''}
-                                                placeholder="입력"
-                                                onChange={e => setPlayerTemplateValues(prev => ({
-                                                  ...prev,
-                                                  [selectedMission.id]: {
-                                                    ...(prev[selectedMission.id] || {}),
-                                                    [cellKey]: e.target.value,
-                                                  },
-                                                }))}
+                                                placeholder={isFormulaCell ? '수식 계산 결과' : '입력'}
+                                                onChange={e => {
+                                                  if (isFormulaCell) return;
+                                                  setPlayerTemplateValues(prev => ({
+                                                    ...prev,
+                                                    [selectedMission.id]: {
+                                                      ...(prev[selectedMission.id] || {}),
+                                                      [cellKey]: e.target.value,
+                                                    },
+                                                  }));
+                                                }}
                                               />
                                             </td>
                                           );
