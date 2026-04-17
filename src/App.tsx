@@ -90,6 +90,9 @@ type GridTemplateConfig = {
   rowHeaders: string[];
   colHeaders: string[];
   colFormulas?: string[];
+  colSuccessThresholds?: number[];
+  colSuccessOperators?: ('ge' | 'le' | 'none')[];
+  colSuccessTargets?: ('value' | 'sum' | 'avg' | 'stddev')[];
   successThreshold: number;
 };
 
@@ -200,6 +203,9 @@ function App() {
   const [newGridRowHeaders, setNewGridRowHeaders] = useState<string[]>([]);
   const [newGridColHeaders, setNewGridColHeaders] = useState<string[]>([]);
   const [newGridColFormulas, setNewGridColFormulas] = useState<string[]>([]);
+  const [newGridColSuccessThresholds, setNewGridColSuccessThresholds] = useState<number[]>([]);
+  const [newGridColSuccessOperators, setNewGridColSuccessOperators] = useState<('ge' | 'le' | 'none')[]>([]);
+  const [newGridColSuccessTargets, setNewGridColSuccessTargets] = useState<('value' | 'sum' | 'avg' | 'stddev')[]>([]);
   const [newGridSuccessThreshold, setNewGridSuccessThreshold] = useState(1);
   const [isTemplatePublishedForNewMission, setIsTemplatePublishedForNewMission] = useState(false);
   const [showTemplateDesigner, setShowTemplateDesigner] = useState(false);
@@ -483,6 +489,9 @@ function App() {
         title: grid.title || '입력 시트',
         headers: grid.colHeaders.map((h, i) => h || `열 ${i + 1}`),
         rows,
+        successThreshold: grid.successThreshold,
+        colSuccessThresholds: grid.colSuccessThresholds || [],
+        colSuccessOperators: grid.colSuccessOperators || [],
       };
     }
 
@@ -496,6 +505,60 @@ function App() {
       mode: 'form' as const,
       rows,
     };
+  };
+
+  const calculateGridTableStats = (tableData: any) => {
+    return tableData.headers.map((_: any, c: number) => {
+      const values = tableData.rows
+        .map((row: any) => Number(row.cells[c]))
+        .filter((v: number) => Number.isFinite(v));
+
+      const sum = values.reduce((acc: number, v: number) => acc + v, 0);
+      const avg = values.length ? sum / values.length : 0;
+      const stddev = values.length > 1
+        ? Math.sqrt(values.reduce((acc: number, v: number) => acc + (v - avg) * (v - avg), 0) / (values.length - 1))
+        : 0;
+      const threshold = Array.isArray(tableData.colSuccessThresholds) && typeof tableData.colSuccessThresholds[c] === 'number'
+        ? tableData.colSuccessThresholds[c]
+        : typeof tableData.successThreshold === 'number'
+        ? tableData.successThreshold
+        : undefined;
+      const operator = Array.isArray(tableData.colSuccessOperators) && typeof tableData.colSuccessOperators[c] === 'string'
+        ? tableData.colSuccessOperators[c]
+        : 'ge';
+      const target = Array.isArray(tableData.colSuccessTargets) && typeof tableData.colSuccessTargets[c] === 'string'
+        ? tableData.colSuccessTargets[c]
+        : 'value';
+      const targetValue = target === 'value'
+        ? values
+        : target === 'sum'
+        ? sum
+        : target === 'avg'
+        ? avg
+        : stddev;
+
+      const successCount = threshold !== undefined && operator !== 'none'
+        ? target === 'value'
+          ? values.filter((v: number) => operator === 'ge' ? v >= threshold : v <= threshold).length
+          : (operator === 'ge' ? targetValue >= threshold : targetValue <= threshold) ? 1 : 0
+        : 0;
+      const successRate = threshold !== undefined && operator !== 'none'
+        ? target === 'value'
+          ? values.length ? (successCount / values.length) * 100 : null
+          : values.length ? (successCount ? 100 : 0) : null
+        : null;
+
+      return {
+        values,
+        sum,
+        avg,
+        stddev,
+        threshold,
+        operator,
+        target,
+        successRate,
+      };
+    });
   };
 
   const isMissingMissionTemplateTableError = (error: any) => {
@@ -1048,6 +1111,11 @@ function App() {
   }, [newGridRows]);
 
   useEffect(() => {
+    setNewGridColSuccessTargets(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push('value');
+      return next.slice(0, newGridCols);
+    });
     setNewGridColHeaders(prev => {
       const next = [...prev];
       while (next.length < newGridCols) next.push(`항목 ${next.length + 1}`);
@@ -1056,6 +1124,21 @@ function App() {
     setNewGridColFormulas(prev => {
       const next = [...prev];
       while (next.length < newGridCols) next.push('');
+      return next.slice(0, newGridCols);
+    });
+    setNewGridColSuccessThresholds(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push(0);
+      return next.slice(0, newGridCols);
+    });
+    setNewGridColSuccessOperators(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push('none');
+      return next.slice(0, newGridCols);
+    });
+    setNewGridColSuccessTargets(prev => {
+      const next = [...prev];
+      while (next.length < newGridCols) next.push('value');
       return next.slice(0, newGridCols);
     });
   }, [newGridCols]);
@@ -1151,6 +1234,9 @@ function App() {
         setNewGridRowHeaders(schema.grid.rowHeaders || []);
         setNewGridColHeaders(schema.grid.colHeaders || []);
         setNewGridColFormulas(schema.grid.colFormulas || []);
+        setNewGridColSuccessThresholds(schema.grid.colSuccessThresholds || []);
+        setNewGridColSuccessOperators(schema.grid.colSuccessOperators || []);
+        setNewGridColSuccessTargets(schema.grid.colSuccessTargets || []);
         setNewGridSuccessThreshold(schema.grid.successThreshold || 1);
         setNewMissionTemplateFields([]);
       } else {
@@ -1189,7 +1275,7 @@ function App() {
       newGridRowHeaders.length === newGridRows &&
       newGridColHeaders.length === newGridCols;
 
-    if (templateTableAvailable && !isEditMode) {
+    if (!isEditMode) {
       if (!isTemplatePublishedForNewMission || (!hasFormTemplate && !hasGridTemplate)) {
         alert('미션 템플릿 설계 후 배포를 완료해야 미션을 등록할 수 있습니다.');
         return;
@@ -1215,6 +1301,9 @@ function App() {
                 rowHeaders: newGridRowHeaders,
                 colHeaders: newGridColHeaders,
                 colFormulas: newGridColFormulas,
+                colSuccessThresholds: newGridColSuccessThresholds,
+                colSuccessOperators: newGridColSuccessOperators,
+                colSuccessTargets: newGridColSuccessTargets,
                 successThreshold: newGridSuccessThreshold,
               },
             }
@@ -3043,6 +3132,93 @@ function App() {
                             </tbody>
                           </table>
                         </div>
+                        <div style={{ marginTop: 10, borderTop: '1px dashed #cbd5e1', paddingTop: 8 }}>
+                          <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 6, fontWeight: 600 }}>자동 계산 통계</div>
+                          <div style={{ overflowX: 'auto', background: '#f7fafc', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+                            <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontSize: '0.76rem' }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>통계</th>
+                                  {tableData.headers.map((header: any, c: number) => (
+                                    <th key={`stat_header_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>
+                                      {header}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(() => {
+                                  const stats = calculateGridTableStats(tableData);
+                                  const renderValues = (values: number[]) => {
+                                    if (values.length <= 10) return values.join(', ');
+                                    return `${values.slice(0, 10).join(', ')} ... (${values.length}개)`;
+                                  };
+
+                                  return (
+                                    <>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>수행값</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_values_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {renderValues(stat.values)}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>합계</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_sum_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.sum.toFixed(2)}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>평균</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_avg_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.avg.toFixed(2)}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>표준편차</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_stddev_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.stddev.toFixed(2)}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>기준 대상</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_target_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.target === 'value' ? '값' : stat.target === 'sum' ? '합계' : stat.target === 'avg' ? '평균' : '표준편차'}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공 기준</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_thresh_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.operator === 'none' ? '없음' : stat.threshold !== undefined ? `${stat.operator === 'ge' ? '≥' : '≤'} ${stat.threshold}` : '-'}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                      <tr>
+                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공률</td>
+                                        {stats.map((stat: any, c: number) => (
+                                          <td key={`stat_success_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                                            {stat.operator === 'none' ? '-' : stat.successRate !== null ? `${stat.successRate.toFixed(1)}%` : '-'}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    </>
+                                  );
+                                })()}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
                       </div>
                     );
                   }
@@ -3240,7 +3416,70 @@ function App() {
                   <input value={newGridTitle} placeholder="시트 제목" onChange={e => { setNewGridTitle(e.target.value); setIsTemplatePublishedForNewMission(false); }} />
                   <input type="number" min={1} max={20} value={newGridRows} onChange={e => { setNewGridRows(Math.max(1, Math.min(20, Number(e.target.value) || 1))); setIsTemplatePublishedForNewMission(false); }} />
                   <input type="number" min={1} max={10} value={newGridCols} onChange={e => { setNewGridCols(Math.max(1, Math.min(10, Number(e.target.value) || 1))); setIsTemplatePublishedForNewMission(false); }} />
-                  <input type="number" min={0} value={newGridSuccessThreshold} placeholder="성공 기준값" onChange={e => { setNewGridSuccessThreshold(Number(e.target.value) || 0); setIsTemplatePublishedForNewMission(false); }} />
+                  <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(2, 1fr)' }}>
+                    {Array.from({ length: newGridCols }).map((_, idx) => (
+                      <div key={`col_threshold_${idx}`} style={{ display: 'grid', gap: 4 }}>
+                        <label style={{ fontSize: '0.78rem', color: '#475569' }}>열 {idx + 1} 성공 기준</label>
+                        <div style={{ display: 'grid', gridTemplateColumns: '80px 90px 1fr', gap: 6, alignItems: 'center' }}>
+                          <select
+                            value={newGridColSuccessOperators[idx] || 'none'}
+                            onChange={e => {
+                              const value = e.target.value as 'ge' | 'le' | 'none';
+                              setNewGridColSuccessOperators(prev => {
+                                const next = [...prev];
+                                next[idx] = value;
+                                return next;
+                              });
+                              setIsTemplatePublishedForNewMission(false);
+                            }}
+                            style={{ width: '100%' }}
+                          >
+                            <option value="none">없음</option>
+                            <option value="ge">이상</option>
+                            <option value="le">이하</option>
+                          </select>
+                          <select
+                            value={newGridColSuccessTargets[idx] || 'value'}
+                            onChange={e => {
+                              const value = e.target.value as 'value' | 'sum' | 'avg' | 'stddev';
+                              setNewGridColSuccessTargets(prev => {
+                                const next = [...prev];
+                                next[idx] = value;
+                                return next;
+                              });
+                              setIsTemplatePublishedForNewMission(false);
+                            }}
+                            style={{ width: '100%' }}
+                          >
+                            <option value="value">값</option>
+                            <option value="sum">합계</option>
+                            <option value="avg">평균</option>
+                            <option value="stddev">표준편차</option>
+                          </select>
+                          <input
+                            type="number"
+                            min={0}
+                            step="any"
+                            disabled={newGridColSuccessOperators[idx] === 'none'}
+                            value={newGridColSuccessOperators[idx] === 'none' ? '' : newGridColSuccessThresholds[idx] ?? ''}
+                            placeholder={newGridColSuccessOperators[idx] === 'none'
+                              ? '기준 없음'
+                              : `열 ${idx + 1} ${newGridColSuccessTargets[idx] || '값'} 기준값`}
+                            onChange={e => {
+                              const rawValue = e.target.value;
+                              setNewGridColSuccessThresholds(prev => {
+                                const next = [...prev];
+                                next[idx] = rawValue === '' ? 0 : Number(rawValue);
+                                return next;
+                              });
+                              setIsTemplatePublishedForNewMission(false);
+                            }}
+                            style={{ width: '100%', minWidth: 90 }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <div>
