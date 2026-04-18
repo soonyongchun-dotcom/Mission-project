@@ -234,6 +234,10 @@ function App() {
   const [showVerificationPanel, setShowVerificationPanel] = useState(false);
   const [selectedMissionId, setSelectedMissionId] = useState<number | null>(null);
   const [selectedPlayerMissionId, setSelectedPlayerMissionId] = useState<number | null>(null);
+  const [selectedCoachMissionId, setSelectedCoachMissionId] = useState<number | null>(null);
+  const [selectedCoachLogId, setSelectedCoachLogId] = useState<number | null>(null);
+  const [selectedCoachPlayerId, setSelectedCoachPlayerId] = useState<string | null>(null);
+  const [selectedCoachPlayerLogId, setSelectedCoachPlayerLogId] = useState<number | null>(null);
   const [playerMissionChat, setPlayerMissionChat] = useState<Record<number, string>>({});
   const [verifiedPlayers, setVerifiedPlayers] = useState<Record<string, boolean>>({});
   const [viewedMissionIds, setViewedMissionIds] = useState<number[]>([]);
@@ -651,28 +655,64 @@ function App() {
   const coachCompletedSummary = useMemo(() => {
     const completedCount = coachCompletedLogs.length;
     const uniquePlayerCount = new Set(coachCompletedLogs.map(log => log.player_id)).size;
-    const recentCompletedAt = coachCompletedLogs[0]?.created_at || null;
-    const missionCounter: Record<number, number> = {};
+    const today = new Date();
+    const todayCompletedPlayerIds = new Set(
+      coachCompletedLogs
+        .filter(log => {
+          if (!log.created_at) return false;
+          const created = new Date(log.created_at);
+          return created.getFullYear() === today.getFullYear()
+            && created.getMonth() === today.getMonth()
+            && created.getDate() === today.getDate();
+        })
+        .map(log => log.player_id)
+    );
 
-    coachCompletedLogs.forEach(log => {
-      missionCounter[log.mission_id] = (missionCounter[log.mission_id] || 0) + 1;
+    const todayCompletedPlayerNames = Array.from(todayCompletedPlayerIds).map(playerId => {
+      const player = players.find(p => p.id === playerId);
+      if (!player) return playerId;
+      if (player.display_name && player.username) return `${player.display_name}(${player.username})`;
+      return player.display_name || player.username || player.id;
     });
 
-    const missionRanking = Object.entries(missionCounter)
-      .map(([missionId, count]) => {
-        const idNum = Number(missionId);
-        const mission = missions.find(m => m.id === idNum);
-        return {
-          missionId: idNum,
-          count,
-          title: mission?.title || `미션 #${missionId}`,
-        };
+    const excludedMissionTitle = '그린주변 벙커샷 거리제어 미션';
+    const recentCompletedMissionLogs = coachCompletedLogs
+      .filter(log => {
+        const mission = missions.find(m => m.id === log.mission_id);
+        return mission?.title !== excludedMissionTitle;
       })
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+      .slice(0, 5)
+      .map(log => {
+        const mission = missions.find(m => m.id === log.mission_id);
+        return {
+          missionId: log.mission_id,
+          logId: log.id,
+          title: mission?.title || `미션 #${log.mission_id}`,
+          createdAt: log.created_at || '',
+        };
+      });
 
-    return { completedCount, uniquePlayerCount, recentCompletedAt, missionRanking };
-  }, [coachCompletedLogs, missions]);
+    return { completedCount, uniquePlayerCount, todayCompletedPlayerNames, recentCompletedMissionLogs };
+  }, [coachCompletedLogs, missions, players]);
+
+  const coachCompletedPlayers = useMemo(() => {
+    const uniquePlayerIds = Array.from(new Set(coachCompletedLogs.map(log => log.player_id)));
+    return uniquePlayerIds.map(playerId => {
+      const player = players.find(p => p.id === playerId);
+      if (!player) return { id: playerId, label: playerId };
+      if (player.display_name && player.username) return { id: playerId, label: `${player.display_name}(${player.username})` };
+      return { id: playerId, label: player.display_name || player.username || player.id };
+    });
+  }, [coachCompletedLogs, players]);
+
+  const coachSelectedPlayerLogs = useMemo(() => {
+    if (!selectedCoachPlayerId) return [] as MissionLog[];
+    return coachCompletedLogs.filter(log => log.player_id === selectedCoachPlayerId);
+  }, [coachCompletedLogs, selectedCoachPlayerId]);
+
+  const coachSelectedPlayerLog = selectedCoachPlayerLogId !== null
+    ? coachCompletedLogs.find(log => log.id === selectedCoachPlayerLogId) || null
+    : null;
 
   const loadMissions = async () => {
     const { data, error } = await supabase
@@ -2321,100 +2361,97 @@ function App() {
     alert('피드백이 저장되었습니다.');
   };
 
-  if (!role) {
-    return (
-      <div style={{ padding: 20, maxWidth: 720, margin: '0 auto', fontFamily: 'sans-serif' }}>
-        <style>{`
-          :root { --background: linear-gradient(180deg, #eff5ff 0%, #f7fbff 100%); }
-          body { background: var(--background); margin: 0; }
-          button { color: #fff; border: none; border-radius: 10px; padding: 8px 14px; cursor: pointer; transition: all 0.2s ease; font-weight: 600; }
-          button:not(.top-action-btn):not(.category-btn) { background: #3f97ff; }
-          button:not(.top-action-btn):not(.category-btn):hover { background: #1f86ff; transform: translateY(-1px); }
-          .top-action-btn, .grey-action { background: #ced4da; color: #333; }
-          .top-action-btn:hover, .grey-action:hover { background: #adb5bd; }
-          .category-btn { background: #20c997; color: #fff; }
-          .category-btn.active { background: #17a2b8; }
-          .category-btn:hover { background: #1ca085; }
-          .content-block { background: #fff; border: 1px solid #e6e6e6; border-radius: 14px; padding: 14px; margin-bottom: 13px; }
-          .content-block-alt { background: #f8fbff; border: 1px solid #dce7f8; border-radius: 14px; padding: 14px; margin-bottom: 13px; }
-          .content-section { background: #f4f8ff; border: 1px solid #d9e6ff; border-radius: 14px; padding: 12px; margin-bottom: 12px; }
-          h1 { margin: 0; font-size: clamp(1.6rem, 5vw, 2.2rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-          h3 { margin: 0; font-size: clamp(0.8rem, 3vw, 1rem); color: #6c757d; }
-          .subtitle { color: #6c757d; font-size: 0.85rem; opacity: 0.8; margin-top: 4px; }
-          .subcategory-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-          .category-box { cursor: default; margin-right: 8px; font-size: 0.9rem; padding: 4px 8px; border-radius: 8px; background: #e5f7ff; border: 1px solid #cde8ff; }
-          .mission-list-container { max-height: 280px; overflow-y: auto; border-radius: 12px; border: 1px solid #ddd; padding: 8px; background: #fff; }
-          input, textarea { border: 1px solid #ccc; border-radius: 8px; }
-        `}</style>
-        <div className="content-block" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, textAlign: 'center' }}>
-          <h1 style={{ margin: 0, fontSize: 'clamp(1.4rem, 5vw, 1.8rem)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            SY_GPMP
-          </h1>
-          <div className="subtitle">ver26.3.1</div>
-        </div>
-        <p>코치 / 선수로 로그인해 주세요.</p>
-        <form style={{ margin: '12px 0' }} onSubmit={e => { e.preventDefault(); handleLogin(); }}>
-          <input
-            name="loginId"
-            style={{ width: 'calc(100% - 12px)', padding: 8, marginBottom: 8 }}
-            placeholder="아이디(코치코드 또는 선수아이디)"
-            value={loginId}
-            onChange={e => setLoginId(e.target.value)}
-            inputMode="text"
-            autoComplete="username"
-            autoCapitalize="none"
-            spellCheck={false}
-          />
-          <input
-            name="loginPassword"
-            type="password"
-            style={{ width: 'calc(100% - 12px)', padding: 8 }}
-            placeholder="비밀번호"
-            value={loginPassword}
-            onChange={e => setLoginPassword(e.target.value)}
-            autoComplete="current-password"
-          />
-          <button type="submit" style={{ display: 'block', marginTop: 8 }}>
-            로그인
-          </button>
-        </form>
-
-        <form style={{ marginTop: 20, padding: 12, border: '1px solid #ddd', borderRadius: 4 }} onSubmit={e => { e.preventDefault(); handleRequestPlayerAccount(); }}>
-          <h4>선수 계정 신청</h4>
-          <input
-            name="requestedUsername"
-            style={{ width: '100%', marginBottom: 8, padding: 8 }}
-            placeholder="신청할 아이디"
-            value={requestedUsername}
-            onChange={e => setRequestedUsername(e.target.value)}
-            autoComplete="username"
-          />
-          <input
-            name="requestedDisplayName"
-            style={{ width: '100%', marginBottom: 8, padding: 8 }}
-            placeholder="선수 이름 (예: 홍길동)"
-            value={requestedDisplayName}
-            onChange={e => setRequestedDisplayName(e.target.value)}
-            autoComplete="name"
-          />
-          <input
-            name="requestedPassword"
-            type="password"
-            style={{ width: '100%', marginBottom: 8, padding: 8 }}
-            placeholder="신청할 비밀번호"
-            value={requestedPassword}
-            onChange={e => setRequestedPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-          <button type="submit">계정 신청</button>
-          <p style={{ marginTop: 8, color: '#555', fontSize: 14 }}>
-            신청 후 코치 인증을 받으면 사용 가능합니다.
-          </p>
-        </form>
-
+  const renderLoginScreen = () => (
+    <div style={{ padding: 20, maxWidth: 720, margin: '0 auto', fontFamily: 'sans-serif' }}>
+      <style>{`
+        :root { --background: linear-gradient(180deg, #eff5ff 0%, #f7fbff 100%); }
+        body { background: var(--background); margin: 0; }
+        button { color: #fff; border: none; border-radius: 10px; padding: 8px 14px; cursor: pointer; transition: all 0.2s ease; font-weight: 600; }
+        button:not(.top-action-btn):not(.category-btn) { background: #3f97ff; }
+        button:not(.top-action-btn):not(.category-btn):hover { background: #1f86ff; transform: translateY(-1px); }
+        .top-action-btn, .grey-action { background: #ced4da; color: #333; }
+        .top-action-btn:hover, .grey-action:hover { background: #adb5bd; }
+        .category-btn { background: #20c997; color: #fff; }
+        .category-btn.active { background: #17a2b8; }
+        .category-btn:hover { background: #1ca085; }
+        .content-block { background: #fff; border: 1px solid #e6e6e6; border-radius: 14px; padding: 14px; margin-bottom: 13px; }
+        .content-block-alt { background: #f8fbff; border: 1px solid #dce7f8; border-radius: 14px; padding: 14px; margin-bottom: 13px; }
+        .content-section { background: #f4f8ff; border: 1px solid #d9e6ff; border-radius: 14px; padding: 12px; margin-bottom: 12px; }
+        h1 { margin: 0; font-size: clamp(1.6rem, 5vw, 2.2rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        h3 { margin: 0; font-size: clamp(0.8rem, 3vw, 1rem); color: #6c757d; }
+        .subtitle { color: #6c757d; font-size: 0.85rem; opacity: 0.8; margin-top: 4px; }
+        .subcategory-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .category-box { cursor: default; margin-right: 8px; font-size: 0.9rem; padding: 4px 8px; border-radius: 8px; background: #e5f7ff; border: 1px solid #cde8ff; }
+        .mission-list-container { max-height: 280px; overflow-y: auto; border-radius: 12px; border: 1px solid #ddd; padding: 8px; background: #fff; }
+        input, textarea { border: 1px solid #ccc; border-radius: 8px; }
+      `}</style>
+      <div className="content-block" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, textAlign: 'center' }}>
+        <h1 style={{ margin: 0, fontSize: 'clamp(1.4rem, 5vw, 1.8rem)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          SY_GPMP
+        </h1>
+        <div className="subtitle">ver26.3.1</div>
       </div>
-    );
-  }
+      <p>코치 / 선수로 로그인해 주세요.</p>
+      <form style={{ margin: '12px 0' }} onSubmit={e => { e.preventDefault(); handleLogin(); }}>
+        <input
+          name="loginId"
+          style={{ width: 'calc(100% - 12px)', padding: 8, marginBottom: 8 }}
+          placeholder="아이디(코치코드 또는 선수아이디)"
+          value={loginId}
+          onChange={e => setLoginId(e.target.value)}
+          inputMode="text"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+        />
+        <input
+          name="loginPassword"
+          type="password"
+          style={{ width: 'calc(100% - 12px)', padding: 8 }}
+          placeholder="비밀번호"
+          value={loginPassword}
+          onChange={e => setLoginPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+        <button type="submit" style={{ display: 'block', marginTop: 8 }}>
+          로그인
+        </button>
+      </form>
+
+      <form style={{ marginTop: 20, padding: 12, border: '1px solid #ddd', borderRadius: 4 }} onSubmit={e => { e.preventDefault(); handleRequestPlayerAccount(); }}>
+        <h4>선수 계정 신청</h4>
+        <input
+          name="requestedUsername"
+          style={{ width: '100%', marginBottom: 8, padding: 8 }}
+          placeholder="신청할 아이디"
+          value={requestedUsername}
+          onChange={e => setRequestedUsername(e.target.value)}
+          autoComplete="username"
+        />
+        <input
+          name="requestedDisplayName"
+          style={{ width: '100%', marginBottom: 8, padding: 8 }}
+          placeholder="선수 이름 (예: 홍길동)"
+          value={requestedDisplayName}
+          onChange={e => setRequestedDisplayName(e.target.value)}
+          autoComplete="name"
+        />
+        <input
+          name="requestedPassword"
+          type="password"
+          style={{ width: '100%', marginBottom: 8, padding: 8 }}
+          placeholder="신청할 비밀번호"
+          value={requestedPassword}
+          onChange={e => setRequestedPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+        <button type="submit">계정 신청</button>
+        <p style={{ marginTop: 8, color: '#555', fontSize: 14 }}>
+          신청 후 코치 인증을 받으면 사용 가능합니다.
+        </p>
+      </form>
+    </div>
+  );
 
   const showVerificationPanelWithCoach = isCoach && currentCoach === 'woody62';
 
@@ -2456,6 +2493,191 @@ function App() {
     return player.id;
   };
 
+  const latestFeedbackLogs = useMemo(() => {
+    const map = new Map<string, MissionLog>();
+    [...missionLogs]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .forEach(log => {
+        const key = `${log.mission_id}:${log.player_id}`;
+        if (!map.has(key)) map.set(key, log);
+      });
+    return Array.from(map.values());
+  }, [missionLogs]);
+
+  const coachSelectedMissionLogs = useMemo(() => {
+    if (selectedCoachMissionId === null) return [] as MissionLog[];
+    return [...latestFeedbackLogs]
+      .filter(log => log.mission_id === selectedCoachMissionId)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }, [latestFeedbackLogs, selectedCoachMissionId]);
+
+  const selectedCoachLog = selectedCoachLogId !== null
+    ? missionLogs.find(log => log.id === selectedCoachLogId) || null
+    : null;
+
+  const renderCoachLogDetail = (log: MissionLog) => {
+    const tableData = getTemplateTableRows(log.mission_id, log.note);
+
+    const renderGridData = () => {
+      if (!tableData || tableData.mode !== 'grid') return null;
+      const stats = calculateGridTableStats(tableData);
+      const renderValues = (values: number[]) => {
+        if (values.length <= 10) return values.join(', ');
+        return `${values.slice(0, 10).join(', ')} ... (${values.length}개)`;
+      };
+
+      return (
+        <div style={{ marginTop: 8, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#f7fafc' }}>
+          <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>입력 템플릿 시트: {tableData.title}</div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>구분</th>
+                  {tableData.headers.map((header, idx) => (
+                    <th key={`coach_header_${log.id}_${idx}`} style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>
+                      {header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tableData.rows.map((row, rIdx) => (
+                  <tr key={`coach_row_${log.id}_${rIdx}`}>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>{row.label}</td>
+                    {row.cells.map((cell, cIdx) => (
+                      <td key={`coach_cell_${log.id}_${rIdx}_${cIdx}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px', textAlign: 'center' }}>
+                        {cell || '-'}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 10, borderTop: '1px dashed #cbd5e1', paddingTop: 8 }}>
+            <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 6, fontWeight: 600 }}>자동 계산 통계</div>
+            <div style={{ overflowX: 'auto', background: '#f7fafc', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+              <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontSize: '0.76rem' }}>
+                <thead>
+                  <tr>
+                    <th style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>통계</th>
+                    {tableData.headers.map((header: any, c: number) => (
+                      <th key={`stat_header_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>
+                        {header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>수행값</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_values_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {renderValues(stat.values)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>합계</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_sum_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.sum.toFixed(2)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>평균</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_avg_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.avg.toFixed(2)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>표준편차</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_stddev_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.stddev.toFixed(2)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>기준 대상</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_target_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.target === 'value' ? '값' : stat.target === 'sum' ? '합계' : stat.target === 'avg' ? '평균' : '표준편차'}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공 기준</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_thresh_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.operator === 'none' ? '없음' : stat.threshold !== undefined ? `${stat.operator === 'ge' ? '≥' : '≤'} ${stat.threshold}` : '-'}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공률</td>
+                    {stats.map((stat: any, c: number) => (
+                      <td key={`stat_success_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
+                        {stat.operator === 'none' ? '-' : stat.successRate !== null ? `${stat.successRate.toFixed(1)}%` : '-'}
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    return (
+      <div key={`coach_log_${log.id}`} style={{ border: '1px dashed #666', marginBottom: 8, padding: 8, background: '#fff' }}>
+        <div style={{ fontSize: '0.88rem', fontWeight: 700, marginBottom: 6 }}>선택된 제출 결과</div>
+        <div>로그 ID: {log.id}</div>
+        <div>미션 ID: {log.mission_id}</div>
+        <div>선수: {getPlayerLabel(log.player_id)}</div>
+        <div>상태: {log.status}</div>
+        <div>제출일: {log.created_at ? new Date(log.created_at).toLocaleString() : '-'}</div>
+        <div style={{ marginTop: 8 }}>{getLogDisplayNote(log.note)}</div>
+        {tableData ? (
+          tableData.mode === 'grid' ? renderGridData() : (
+            <div style={{ marginTop: 8, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#fff' }}>
+              <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>입력 템플릿 항목</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <tbody>
+                  {tableData.rows.map((row, idx) => (
+                    <tr key={`coach_form_${log.id}_${idx}`}>
+                      <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', width: '35%', fontWeight: 600 }}>{row.label}</td>
+                      <td style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>{row.value || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : (
+          <div style={{ marginTop: 8, fontSize: '0.82rem', color: '#334155' }}>
+            입력값 요약: {getTemplateValueSummary(log.mission_id, log.note)}
+          </div>
+        )}
+        <div>코치: {log.coach_feedback || '없음'}</div>
+        <textarea
+          value={coachFeedback[log.id] || ''}
+          onChange={e => setCoachFeedback(prev => ({ ...prev, [log.id]: e.target.value }))}
+          placeholder="코치 코멘트를 입력하세요"
+          style={{ width: '100%', minHeight: 60, marginTop: 8 }}
+        />
+        <button onClick={() => handleCoachFeedback(log.id)} style={{ marginTop: 8 }}>
+          전송
+        </button>
+      </div>
+    );
+  };
+
   const openShotConsistencyTool = async () => {
     const localUrl = 'file:///C:/workspace/scatter_consistency_master_ui.html';
     const basePath = window.location.pathname.replace(/\/[^/]*$/, '');
@@ -2489,6 +2711,8 @@ function App() {
 
     alert('샷 일관성 도구를 찾을 수 없습니다. public 폴더에 scatter_consistency_master_ui.html을 두고 테스트하세요. (예: http://localhost:5174/Mission-project/scatter_consistency_master_ui.html)');
   };
+
+  if (!role) return renderLoginScreen();
 
   return (
     <div style={{
@@ -2764,7 +2988,9 @@ function App() {
 
       {isCoach && (
         <div style={{ marginTop: 20 }}>
-          <h3>미션 리스트 (코치 모드)</h3>
+          <h3 style={{ color: '#334155', fontWeight: 700, letterSpacing: '0.02em', fontFamily: 'Apple SD Gothic Neo, sans-serif', marginBottom: 10 }}>
+            미션 리스트 (코치 모드)
+          </h3>
 
           <div style={{ marginBottom: 12 }}>
             <span style={{ color: '#666' }}>
@@ -2963,7 +3189,9 @@ function App() {
       )}
       {isCoach && (
         <div style={{ marginTop: 24, borderTop: '1px solid #eee', paddingTop: 12 }}>
-          <h3>{editingMissionId !== null ? `미션 수정 #${editingMissionId}` : '미션 추가'}</h3>
+          <h3 style={{ color: '#334155', fontWeight: 700, letterSpacing: '0.02em', fontFamily: 'Apple SD Gothic Neo, sans-serif', marginBottom: 10 }}>
+            {editingMissionId !== null ? `미션 수정 #${editingMissionId}` : '미션 추가'}
+          </h3>
           {editingMissionId !== null && (
             <p style={{ marginTop: -2, marginBottom: 8, color: '#475569', fontSize: '0.88rem' }}>
               저장소에서 불러온 미션을 수정 중입니다. 수정 저장 시 기존 미션이 업데이트됩니다.
@@ -3047,207 +3275,191 @@ function App() {
 
       {isCoach && (
         <div style={{ marginTop: 24, borderTop: '1px solid #eee', paddingTop: 12 }}>
-          <h3>코치 미션 로그 / 피드백 관리</h3>
+          <h3 style={{ color: '#334155', fontWeight: 700, letterSpacing: '0.02em', fontFamily: 'Apple SD Gothic Neo, sans-serif', marginBottom: 10 }}>
+            코치 미션 로그 / 피드백 관리
+          </h3>
           <div style={{ marginBottom: 12, border: '1px solid #d8e4ff', borderRadius: 8, padding: 10, background: '#f9fcff' }}>
-            <strong>완료 로그 분석</strong>
+            <strong style={{ color: '#334155', fontWeight: 700, display: 'block', marginBottom: 6 }}>완료 로그 분석</strong>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
               <div style={{ minWidth: 140, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
-                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>총 완료 제출</div>
-                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{coachCompletedSummary.completedCount}건</div>
+                <div style={{ fontSize: '0.78rem', color: '#52606d' }}>총 완료 제출</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#334155' }}>{coachCompletedSummary.completedCount}건</div>
               </div>
-              <div style={{ minWidth: 140, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
-                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>완료 선수 수</div>
-                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{coachCompletedSummary.uniquePlayerCount}명</div>
-              </div>
-              <div style={{ minWidth: 220, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
-                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>최근 완료</div>
-                <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#0f172a' }}>
-                  {coachCompletedSummary.recentCompletedAt ? new Date(coachCompletedSummary.recentCompletedAt).toLocaleString() : '없음'}
+              <div style={{ minWidth: 240, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff' }}>
+                <div style={{ fontSize: '0.78rem', color: '#52606d' }}>오늘미션 완료선수</div>
+                <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#334155', whiteSpace: 'pre-line', lineHeight: 1.4 }}>
+                  {coachCompletedSummary.todayCompletedPlayerNames.length > 0
+                    ? coachCompletedSummary.todayCompletedPlayerNames.slice(0, 4).join(', ') +
+                      (coachCompletedSummary.todayCompletedPlayerNames.length > 4 ? ` 외 ${coachCompletedSummary.todayCompletedPlayerNames.length - 4}명` : '')
+                    : '-'}
                 </div>
               </div>
             </div>
 
             <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: '0.82rem', color: '#475569', marginBottom: 4 }}>미션별 완료 상위 5개</div>
-              {coachCompletedSummary.missionRanking.length === 0 ? (
+              <div style={{ fontSize: '0.82rem', color: '#334155', marginBottom: 4, fontWeight: 600 }}>선수별 완료 제출</div>
+              {coachCompletedPlayers.length === 0 ? (
+                <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>완료 제출 선수가 아직 없습니다.</div>
+              ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {coachCompletedPlayers.map(player => (
+                    <button
+                      key={player.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedCoachPlayerId(player.id);
+                        setSelectedCoachPlayerLogId(null);
+                      }}
+                      style={{
+                        border: '1px solid #e2e8f0',
+                        borderRadius: 6,
+                        background: selectedCoachPlayerId === player.id ? '#eef6ff' : '#fff',
+                        padding: '8px 10px',
+                        cursor: 'pointer',
+                        textAlign: 'center',
+                        fontSize: '0.85rem',
+                        color: '#1f2937',
+                      }}
+                    >
+                      {player.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {selectedCoachPlayerId ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1f2937', marginBottom: 8 }}>
+                    {coachCompletedPlayers.find(p => p.id === selectedCoachPlayerId)?.label || selectedCoachPlayerId}님의 제출 미션
+                  </div>
+                  {coachSelectedPlayerLogs.length === 0 ? (
+                    <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>이 선수의 완료 제출 미션이 없습니다.</div>
+                  ) : (
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      {coachSelectedPlayerLogs.map(log => {
+                        const mission = missions.find(m => m.id === log.mission_id);
+                        return (
+                          <button
+                            key={log.id}
+                            type="button"
+                            onClick={() => setSelectedCoachPlayerLogId(log.id)}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 6,
+                              background: selectedCoachPlayerLogId === log.id ? '#eef6ff' : '#fff',
+                              padding: '10px 12px',
+                              cursor: 'pointer',
+                              textAlign: 'left',
+                            }}
+                          >
+                            <span style={{ fontSize: '0.88rem', color: '#1f2937' }}>{mission?.title || `미션 #${log.mission_id}`}</span>
+                            <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+                              {log.created_at ? new Date(log.created_at).toLocaleString() : '-'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {coachSelectedPlayerLog ? (
+                    <div style={{ marginTop: 10 }}>
+                      {renderCoachLogDetail(coachSelectedPlayerLog)}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 10, fontSize: '0.85rem', color: '#64748b' }}>
+                      목록에서 선수의 제출 로그를 선택하면 상세 내용을 확인할 수 있습니다.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ marginTop: 10, fontSize: '0.85rem', color: '#64748b' }}>선수를 선택하면 해당 선수의 완료 제출 미션 목록을 볼 수 있습니다.</div>
+              )}
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: '0.82rem', color: '#475569', marginBottom: 4 }}>최근 완료미션</div>
+              {coachCompletedSummary.recentCompletedMissionLogs.length === 0 ? (
                 <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>완료 로그가 아직 없습니다.</div>
               ) : (
                 <div style={{ display: 'grid', gap: 6 }}>
-                  {coachCompletedSummary.missionRanking.map(item => (
-                    <div key={item.missionId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #e2e8f0', borderRadius: 6, background: '#fff', padding: '6px 8px' }}>
+                  {coachCompletedSummary.recentCompletedMissionLogs.map(item => (
+                    <button
+                      key={item.logId}
+                      type="button"
+                      onClick={() => {
+                        setSelectedCoachMissionId(item.missionId);
+                        setSelectedCoachLogId(item.logId);
+                      }}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: 6,
+                        background: selectedCoachLogId === item.logId ? '#eef6ff' : '#fff',
+                        padding: '10px 12px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
                       <span style={{ fontSize: '0.88rem', color: '#1f2937' }}>{item.title}</span>
-                      <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#0f172a' }}>{item.count}건</span>
-                    </div>
+                      <span style={{ fontSize: '0.82rem', color: '#475569' }}>{item.createdAt ? new Date(item.createdAt).toLocaleString() : '-'}</span>
+                    </button>
                   ))}
                 </div>
               )}
             </div>
           </div>
           <div style={{ maxHeight: 440, overflowY: 'auto', paddingRight: 6 }}>
-            {missionLogs.map(log => (
-              <div key={log.id} style={{ border: '1px dashed #666', marginBottom: 8, padding: 8 }}>
-                <div>로그 ID: {log.id}</div>
-                <div>미션 ID: {log.mission_id}</div>
-                <div>선수: {getPlayerLabel(log.player_id)}</div>
-                <div>상태: {log.status}</div>
-                <div>선수코멘트: {getLogDisplayNote(log.note)}</div>
-                {(() => {
-                  const tableData = getTemplateTableRows(log.mission_id, log.note);
-                  if (!tableData) {
-                    return <div style={{ fontSize: '0.82rem', color: '#334155' }}>입력값 요약: {getTemplateValueSummary(log.mission_id, log.note)}</div>;
-                  }
-
-                  if (tableData.mode === 'grid') {
-                    return (
-                      <div style={{ marginTop: 6, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#fff' }}>
-                        <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>
-                          입력 템플릿 시트: {tableData.title}
-                        </div>
-                        <div style={{ overflowX: 'auto' }}>
-                          <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse' }}>
-                            <thead>
-                              <tr>
-                                <th style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>구분</th>
-                                {tableData.headers.map((header, idx) => (
-                                  <th key={`coach_header_${log.id}_${idx}`} style={{ border: '1px solid #dbe4f0', background: '#f1f5f9', padding: '4px 6px' }}>
-                                    {header}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {tableData.rows.map((row, rIdx) => (
-                                <tr key={`coach_row_${log.id}_${rIdx}`}>
-                                  <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>{row.label}</td>
-                                  {row.cells.map((cell, cIdx) => (
-                                    <td key={`coach_cell_${log.id}_${rIdx}_${cIdx}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px', textAlign: 'center' }}>
-                                      {cell || '-'}
-                                    </td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div style={{ marginTop: 10, borderTop: '1px dashed #cbd5e1', paddingTop: 8 }}>
-                          <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 6, fontWeight: 600 }}>자동 계산 통계</div>
-                          <div style={{ overflowX: 'auto', background: '#f7fafc', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                            <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontSize: '0.76rem' }}>
-                              <thead>
-                                <tr>
-                                  <th style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>통계</th>
-                                  {tableData.headers.map((header: any, c: number) => (
-                                    <th key={`stat_header_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', background: '#edf2f7', padding: '5px 6px', fontWeight: 700 }}>
-                                      {header}
-                                    </th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {(() => {
-                                  const stats = calculateGridTableStats(tableData);
-                                  const renderValues = (values: number[]) => {
-                                    if (values.length <= 10) return values.join(', ');
-                                    return `${values.slice(0, 10).join(', ')} ... (${values.length}개)`;
-                                  };
-
-                                  return (
-                                    <>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>수행값</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_values_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {renderValues(stat.values)}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>합계</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_sum_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.sum.toFixed(2)}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>평균</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_avg_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.avg.toFixed(2)}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>표준편차</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_stddev_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.stddev.toFixed(2)}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>기준 대상</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_target_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.target === 'value' ? '값' : stat.target === 'sum' ? '합계' : stat.target === 'avg' ? '평균' : '표준편차'}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공 기준</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_thresh_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.operator === 'none' ? '없음' : stat.threshold !== undefined ? `${stat.operator === 'ge' ? '≥' : '≤'} ${stat.threshold}` : '-'}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                      <tr>
-                                        <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', fontWeight: 600 }}>성공률</td>
-                                        {stats.map((stat: any, c: number) => (
-                                          <td key={`stat_success_${log.id}_${c}`} style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>
-                                            {stat.operator === 'none' ? '-' : stat.successRate !== null ? `${stat.successRate.toFixed(1)}%` : '-'}
-                                          </td>
-                                        ))}
-                                      </tr>
-                                    </>
-                                  );
-                                })()}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div style={{ marginTop: 6, border: '1px solid #dbe4f0', borderRadius: 6, padding: 8, background: '#fff' }}>
-                      <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6, fontWeight: 600 }}>입력 템플릿 항목</div>
-                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <tbody>
-                          {tableData.rows.map((row, idx) => (
-                            <tr key={`coach_form_${log.id}_${idx}`}>
-                              <td style={{ border: '1px solid #dbe4f0', background: '#f8fafc', padding: '4px 6px', width: '35%', fontWeight: 600 }}>{row.label}</td>
-                              <td style={{ border: '1px solid #dbe4f0', padding: '4px 6px' }}>{row.value || '-'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  );
-                })()}
-                <div>코치: {log.coach_feedback || '없음'}</div>
-                <textarea
-                  value={coachFeedback[log.id] || ''}
-                  onChange={e => setCoachFeedback(prev => ({ ...prev, [log.id]: e.target.value }))}
-                  placeholder="코치 코멘트를 입력하세요"
-                  style={{ width: '100%', minHeight: 60, marginTop: 8 }}
-                />
-                <button onClick={() => handleCoachFeedback(log.id)} style={{ marginTop: 8 }}>
-                  전송
-                </button>
+            {selectedCoachMissionId !== null ? (
+              <div style={{ display: 'grid', gap: 12 }}>
+                <div style={{ fontSize: '0.92rem', fontWeight: 700, color: '#1f2937' }}>
+                  선택된 미션 #{selectedCoachMissionId} 제출 로그
+                </div>
+                {coachSelectedMissionLogs.length === 0 ? (
+                  <div style={{ color: '#64748b' }}>선택된 미션의 완료 제출 로그가 없습니다.</div>
+                ) : (
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {coachSelectedMissionLogs.map(log => (
+                      <button
+                        key={log.id}
+                        type="button"
+                        onClick={() => setSelectedCoachLogId(log.id)}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          border: '1px solid #e2e8f0',
+                          borderRadius: 6,
+                          background: selectedCoachLogId === log.id ? '#eef6ff' : '#fff',
+                          padding: '10px 12px',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
+                      >
+                        <span style={{ fontSize: '0.88rem', color: '#1f2937' }}>{getPlayerLabel(log.player_id)}</span>
+                        <span style={{ fontSize: '0.82rem', color: '#475569' }}>{log.created_at ? new Date(log.created_at).toLocaleString() : '-'}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {selectedCoachLog ? (
+                  renderCoachLogDetail(selectedCoachLog)
+                ) : (
+                  <div style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 6, background: '#f8fafc', color: '#475569' }}>
+                    제출 로그를 선택하면 미션 완료 제출 결과를 확인할 수 있습니다.
+                  </div>
+                )}
               </div>
-            ))}
+            ) : (
+              latestFeedbackLogs.length === 0 ? (
+                <div style={{ color: '#64748b' }}>최근 완료 제출 로그가 없습니다.</div>
+              ) : (
+                latestFeedbackLogs.map(log => renderCoachLogDetail(log))
+              )
+            )}
           </div>
         </div>
       )}
