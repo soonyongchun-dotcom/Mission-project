@@ -492,6 +492,7 @@ function App() {
         successThreshold: grid.successThreshold,
         colSuccessThresholds: grid.colSuccessThresholds || [],
         colSuccessOperators: grid.colSuccessOperators || [],
+        colSuccessTargets: grid.colSuccessTargets || [],
       };
     }
 
@@ -1638,10 +1639,6 @@ function App() {
       return;
     }
 
-    if (latestMissionStatusById[missionId] === 'completed') {
-      alert('이미 완료 제출된 미션입니다.');
-      return;
-    }
 
     const note = playerMissionNotes[missionId]?.trim() || '';
     const template = missionTemplates[missionId];
@@ -3740,7 +3737,7 @@ function App() {
                 {selectedMission ? (
                   <div style={{ border: '1px solid #d0e4ff', borderRadius: 8, padding: 12, background: '#f9fcff', marginBottom: 16 }}>
                     {(() => {
-                      const isSubmitted = latestMissionStatusById[selectedMission.id] === 'completed';
+                      const isMissionCompleted = latestMissionStatusById[selectedMission.id] === 'completed';
                       const selectedFiles = playerMissionFiles[selectedMission.id] || [];
                       const draftFiles = playerDraftAttachments[selectedMission.id] || [];
                       const missionTemplate = missionTemplates[selectedMission.id];
@@ -3749,17 +3746,19 @@ function App() {
                       const currentTemplateValues = gridTemplate
                         ? applyGridFormulasToValues(currentTemplateValuesRaw, gridTemplate)
                         : currentTemplateValuesRaw;
+                      const currentColSuccessTargets = gridTemplate?.colSuccessTargets || [];
+                      const currentColSuccessOperators = gridTemplate?.colSuccessOperators || [];
+                      const currentColSuccessThresholds = gridTemplate?.colSuccessThresholds || [];
 
                       return (
                         <div style={{ marginBottom: 10, padding: 10, border: '1px solid #d8e4ff', borderRadius: 8, background: '#ffffff' }}>
                           <strong>미션 결과 입력</strong>
                           <textarea
                             rows={4}
-                            style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 6, border: '1px solid #d9dee8', background: isSubmitted ? '#f3f4f6' : '#fff', color: '#1f2937' }}
+                            style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 6, border: '1px solid #d9dee8', background: isMissionCompleted ? '#f3f4f6' : '#fff', color: '#1f2937' }}
                             value={playerMissionNotes[selectedMission.id] || ''}
                             onChange={e => setPlayerMissionNotes(prev => ({ ...prev, [selectedMission.id]: e.target.value }))}
                             placeholder="미션 수행 결과를 입력하세요. (자동 임시저장)"
-                            disabled={isSubmitted}
                           />
 
                           {(missionTemplate?.schema_json?.mode || 'form') === 'grid' && gridTemplate ? (
@@ -3792,7 +3791,7 @@ function App() {
                                           return (
                                             <td key={cellKey} style={{ border: '1px solid #dbe1ea', padding: 4 }}>
                                               <input
-                                                disabled={isSubmitted || isFormulaCell}
+                                                disabled={isFormulaCell}
                                                 value={currentTemplateValues[cellKey] || ''}
                                                 placeholder={isFormulaCell ? '수식 계산 결과' : '입력'}
                                                 onChange={e => {
@@ -3827,12 +3826,40 @@ function App() {
                                   const stddev = colValues.length > 1
                                     ? Math.sqrt(colValues.reduce((acc, v) => acc + (v - avg) * (v - avg), 0) / (colValues.length - 1))
                                     : 0;
-                                  const successCount = colValues.filter(v => v >= (gridTemplate.successThreshold ?? 1)).length;
-                                  const successRate = colValues.length ? (successCount / colValues.length) * 100 : 0;
+                                  const operator = Array.isArray(gridTemplate.colSuccessOperators) && typeof gridTemplate.colSuccessOperators[c] === 'string'
+                                    ? gridTemplate.colSuccessOperators[c]
+                                    : 'none';
+                                  const threshold = Array.isArray(gridTemplate.colSuccessThresholds) && typeof gridTemplate.colSuccessThresholds[c] === 'number'
+                                    ? gridTemplate.colSuccessThresholds[c]
+                                    : typeof gridTemplate.successThreshold === 'number'
+                                      ? gridTemplate.successThreshold
+                                      : undefined;
+                                  const target = Array.isArray(gridTemplate.colSuccessTargets) && typeof gridTemplate.colSuccessTargets[c] === 'string'
+                                    ? gridTemplate.colSuccessTargets[c]
+                                    : 'value';
+                                  const successCount = threshold !== undefined && operator !== 'none'
+                                    ? target === 'value'
+                                      ? colValues.filter((v: number) => operator === 'ge' ? v >= threshold : v <= threshold).length
+                                      : (() => {
+                                          const targetValue = target === 'sum'
+                                            ? sum
+                                            : target === 'avg'
+                                            ? avg
+                                            : stddev;
+                                          return (operator === 'ge' ? targetValue >= threshold : targetValue <= threshold) ? 1 : 0;
+                                        })()
+                                    : 0;
+                                  const successRate = threshold !== undefined && operator !== 'none'
+                                    ? target === 'value'
+                                      ? colValues.length ? (successCount / colValues.length) * 100 : null
+                                      : colValues.length ? (successCount ? 100 : 0) : null
+                                    : null;
+                                  const targetLabel = target === 'value' ? '값' : target === 'sum' ? '합계' : target === 'avg' ? '평균' : '표준편차';
+                                  const criteriaLabel = operator === 'none' ? '없음' : `${operator === 'ge' ? '≥' : '≤'} ${threshold}`;
 
                                   return (
                                     <div key={`calc_${c}`} style={{ fontSize: '0.78rem', color: '#334155', marginBottom: 2 }}>
-                                      {gridTemplate.colHeaders[c] || `열 ${c + 1}`}: 합계 {sum.toFixed(2)} / 평균 {avg.toFixed(2)} / 표준편차 {stddev.toFixed(2)} / 성공률 {successRate.toFixed(1)}%
+                                      {gridTemplate.colHeaders[c] || `열 ${c + 1}`}: 합계 {sum.toFixed(2)} / 평균 {avg.toFixed(2)} / 표준편차 {stddev.toFixed(2)} / 기준 대상 {targetLabel} / 성공 기준 {criteriaLabel} / 성공률 {successRate !== null ? `${successRate.toFixed(1)}%` : '-'}
                                     </div>
                                   );
                                 })}
@@ -3848,7 +3875,6 @@ function App() {
                                   </label>
                                   {field.type === 'select' ? (
                                     <select
-                                      disabled={isSubmitted}
                                       value={currentTemplateValues[field.key] || ''}
                                       onChange={e => setPlayerTemplateValues(prev => ({
                                         ...prev,
@@ -3866,7 +3892,6 @@ function App() {
                                   ) : (
                                     <input
                                       type={field.type === 'number' ? 'number' : 'text'}
-                                      disabled={isSubmitted}
                                       placeholder={field.placeholder || '입력'}
                                       value={currentTemplateValues[field.key] || ''}
                                       onChange={e => setPlayerTemplateValues(prev => ({
@@ -3894,9 +3919,8 @@ function App() {
                               type="file"
                               accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.bmp,.gif"
                               multiple
-                              disabled={isSubmitted}
                               onChange={e => {
-                                if (isSubmitted || !e.target.files) return;
+                                if (!e.target.files) return;
                                 const incoming = Array.from(e.target.files);
                                 setPlayerMissionFiles(prev => {
                                   const next = [...(prev[selectedMission.id] || []), ...incoming];
@@ -3921,7 +3945,6 @@ function App() {
                           <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                             <button
                               type="button"
-                              disabled={isSubmitted}
                               onClick={() => saveMissionDraft(selectedMission.id, { includeFiles: false, silent: false })}
                               style={{ fontSize: '0.85rem', padding: '6px 10px', background: '#64748b' }}
                             >
@@ -3929,7 +3952,6 @@ function App() {
                             </button>
                             <button
                               type="button"
-                              disabled={isSubmitted}
                               onClick={() => handleCompleteMission(selectedMission.id)}
                               style={{ fontSize: '0.85rem', padding: '6px 10px', background: '#16a34a' }}
                             >
@@ -3937,8 +3959,8 @@ function App() {
                             </button>
                           </div>
 
-                          <div style={{ marginTop: 6, fontSize: '0.8rem', color: isSubmitted ? '#166534' : '#475569' }}>
-                            상태: {isSubmitted ? '완료 제출됨 (읽기 전용)' : (draftSaveStatus[selectedMission.id] || '입력 중')}
+                          <div style={{ marginTop: 6, fontSize: '0.8rem', color: isMissionCompleted ? '#166534' : '#475569' }}>
+                            상태: {isMissionCompleted ? '완료 제출됨 (재수행 가능)' : (draftSaveStatus[selectedMission.id] || '입력 중')}
                           </div>
                         </div>
                       );
